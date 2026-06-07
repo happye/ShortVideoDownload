@@ -202,3 +202,101 @@
 1. 首选：使用 Firefox 浏览器 + `--browser-cookie firefox`
 2. 次选：手动导出 `cookies.txt` 文件放到项目根目录
 3. 最后：使用 `--cookie` 参数手动提供 Cookie 字符串
+
+---
+
+## 问题 #9: 下载时无进度日志
+
+**状态**: 已修复 ✅
+
+**描述**: 下载过程中没有任何输出，用户无法看到工作进度。
+
+**修复方案**: 在 `BaseEngine.download_user()` 中添加完整的进度输出：
+- `[1/43] 下载中: 标题...`
+- `[1/43] 完成 (1.3 MB): 标题...`
+- `[1/43] 跳过(已存在): 标题...`
+- `[1/43] 失败: 标题... - 错误原因`
+- 汇总：成功/跳过/失败数量、文件数、总大小、耗时
+
+**修改文件**: `engines/base.py`
+
+---
+
+## 问题 #10: 下载 TXT 描述文件无意义
+
+**状态**: 已修复 ✅
+
+**描述**: 每个视频都会下载一个 .txt 描述文件，用户不需要。
+
+**修复方案**:
+- `config.py` 中 `save_desc` 默认改为 `False`
+- 所有 5 个引擎的 `save_desc` TXT 保存代码已移除
+
+**修改文件**: `config.py`, `engines/douyin.py`, `engines/kuaishou.py`, `engines/xiaohongshu.py`, `engines/bilibili.py`, `engines/weibo.py`
+
+---
+
+## 问题 #11: 同一视频循环下载无限重复（严重 bug）
+
+**状态**: 已修复 ✅
+
+**描述**: 下载同一用户视频时，已下载的视频会被重命名（_001, _002, _003...）后重新下载，永远不会停止。
+
+**根因**: 旧版 `_make_filepath()` 使用 `deduplicate_filepath()` 给同名文件加后缀，导致同一视频被反复下载并重命名。
+
+**修复方案**:
+1. 文件名加入 item_id：`标题_7647481637089326824.mp4`
+2. `download_item()` 检查目标文件是否已存在 → 已存在则跳过
+3. `download_user()` 启动时扫描目录，提取已有 item_id 集合
+4. 遍历作品时，item_id 在已有集合中 → 跳过
+
+**修改文件**: `engines/base.py`, `engines/douyin.py`
+
+**验证**: 第二次运行同一用户时，3 个视频全部显示"跳过(已存在)"
+
+---
+
+## 问题 #12: f2 库冗余日志输出
+
+**状态**: 已修复 ✅
+
+**描述**: f2 库输出大量 INFO 日志（"处理第0页"、"等待5秒"、"所有作品采集完毕"）和 ERROR 日志（Bark 通知发送失败）。
+
+**根因**: f2 的日志有两个来源：
+1. logging 系统（logger.info/error）—— RichHandler 输出到控制台
+2. `rich_console.print()` 直接输出 —— 不走 logging 系统
+
+**修复方案**:
+1. f2 logger 级别设为 CRITICAL（抑制所有 logging 输出）
+2. Monkey-patch `rich_console` 替换为写入 `io.StringIO()` 的静默 Console
+3. 先 import f2（触发 `log_setup()`）→ 再设置级别（避免被覆盖）
+
+**修改文件**: `engines/douyin.py`, `engines/__init__.py`, `svd.py`
+
+---
+
+## 问题 #13: Windows 中文编码乱码
+
+**状态**: 已修复 ✅
+
+**描述**: run.bat 和 Python 输出的中文在 Windows CMD 中显示为乱码。
+
+**修复方案**:
+- `run.bat` 改为 GBK 编码保存
+- 执行 Python 前切换到 UTF-8 代码页（`chcp 65001`），执行后切回 GBK（`chcp 936`）
+- `svd.py` 入口设置 `SetConsoleOutputCP(65001)` + 重包装 stdout/stderr 为 UTF-8
+- `Console(force_terminal=sys.stdout.isatty())` 避免非终端环境的重复输出
+
+**修改文件**: `run.bat`, `svd.py`
+
+---
+
+## 问题 #14: 浏览器 Cookie 提取失败大段报错
+
+**状态**: 已修复 ✅
+
+**描述**: 使用 `--browser-cookie edge` 提取失败时，显示大段"可能的原因"和"替代方案"错误信息，即使 cookies.txt 回退成功也会显示。
+
+**修复方案**: `except RuntimeError` 中改为静默 `pass`，让 cookies.txt 回退成功后只显示成功信息。
+
+**修改文件**: `svd.py`

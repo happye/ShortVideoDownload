@@ -24,7 +24,11 @@ call :show_help
 REM === 循环命令 ===
 :loop
 echo.
+set "cmd="
 set /p "cmd=SVD> "
+
+REM 空输入则重新等待（防止重复执行上一条命令）
+if not defined cmd goto loop
 
 if /i "%cmd%"==q goto :eof
 if /i "%cmd%"==quit goto :eof
@@ -32,12 +36,8 @@ if /i "%cmd%"==exit goto :eof
 if /i "%cmd%"==h call :show_help & goto loop
 if /i "%cmd%"==help call :show_help & goto loop
 
-REM 切换到 UTF-8 代码页（Python 输出需要 UTF-8）
-chcp 65001 >nul 2>&1
 REM 执行 svd.py 命令
 python svd.py %cmd%
-REM 切换回 GBK 代码页（bat 文件的 echo 命令需要 GBK）
-chcp 936 >nul 2>&1
 goto loop
 
 REM === 帮助信息 ===

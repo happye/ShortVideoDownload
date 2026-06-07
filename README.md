@@ -155,13 +155,18 @@ ShortVideoDownload/
 ├── svd.py              # 主入口 CLI
 ├── config.py           # 配置管理
 ├── utils.py            # 工具函数（含浏览器Cookie提取）
+├── CLAUDE.md           # AI Agent 规则手册
 ├── engines/
 │   ├── base.py         # 引擎基类
 │   ├── douyin.py       # 抖音引擎 (f2)
 │   ├── kuaishou.py     # 快手引擎 (Web API)
 │   ├── xiaohongshu.py  # 小红书引擎 (HTML解析 + yt-dlp)
-│   ├── bilibili.py     # B站引擎 (wbi API + yt-dlp)
+│   ├── bilibili.py     # B站引擎 (旧API + yt-dlp)
 │   └── weibo.py        # 微博引擎 (Web API)
+├── docs/
+│   ├── architecture.md # 架构设计
+│   ├── cookie-guide.md # Cookie 配置指南
+│   └── troubleshooting.md # 故障排查
 ├── output/             # 默认下载目录
 ├── cookies.txt         # Cookie文件（可选，Netscape格式）
 ├── venv/               # 独立虚拟环境
