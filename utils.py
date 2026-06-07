@@ -1,0 +1,382 @@
+"""
+ShortVideoDownload - 工具函数
+"""
+import os
+import re
+import unicodedata
+from pathlib import Path
+
+
+def sanitize_filename(name: str, max_length: int = 200) -> str:
+    """
+    清理文件名，移除非法字符，截断过长的名字
+    """
+    # 移除 Windows 文件名非法字符
+    illegal_chars = r'[<>:"/\\|?*\x00-\x1f]'
+    name = re.sub(illegal_chars, '_', name)
+    # 将连续空格替换为单个空格
+    name = re.sub(r'\s+', ' ', name)
+    # 移除首尾空格和点号
+    name = name.strip(' .')
+    # 规范化 Unicode
+    name = unicodedata.normalize('NFC', name)
+    # 截断（保留扩展名空间）
+    if len(name) > max_length:
+        name = name[:max_length]
+    # 空名回退
+    if not name:
+        name = "untitled"
+    return name
+
+
+def deduplicate_filepath(filepath: str, duplicate_format: str = "_{seq:03d}") -> str:
+    """
+    处理文件名重复：如果文件已存在，在文件名后追加序号
+    例如：video.mp4 → video_001.mp4 → video_002.mp4
+    """
+    if not os.path.exists(filepath):
+        return filepath
+
+    base, ext = os.path.splitext(filepath)
+    seq = 1
+    while True:
+        new_path = f"{base}{duplicate_format.format(seq=seq)}{ext}"
+        if not os.path.exists(new_path):
+            return new_path
+        seq += 1
+        # 安全阈值
+        if seq > 9999:
+            raise RuntimeError(f"Too many duplicate files for: {filepath}")
+
+
+def ensure_dir(path: str) -> str:
+    """确保目录存在"""
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def truncate_desc(desc: str, max_len: int = 80) -> str:
+    """
+    截断描述文字用于文件名
+    取第一行，去除换行和特殊字符
+    """
+    if not desc:
+        return "untitled"
+    # 取第一行
+    first_line = desc.split('\n')[0].strip()
+    # 移除话题标签
+    first_line = re.sub(r'#\S+\s*', '', first_line).strip()
+    # 截断
+    if len(first_line) > max_len:
+        first_line = first_line[:max_len]
+    return sanitize_filename(first_line) if first_line else "untitled"
+
+
+def format_file_size(size_bytes: int) -> str:
+    """格式化文件大小"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+
+def detect_platform(url: str) -> str:
+    """
+    根据 URL 检测平台
+    返回平台标识字符串
+    """
+    from config import PLATFORM_PATTERNS
+
+    url_lower = url.lower()
+    for platform, patterns in PLATFORM_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, url_lower):
+                return platform
+    return "unknown"
+
+
+def extract_user_id(url: str, platform: str) -> str:
+    """
+    从 URL 中提取用户 ID
+    不同平台的用户主页 URL 格式不同
+    """
+    if platform == "douyin":
+        # https://www.douyin.com/user/MS4wLjABAAAA...
+        match = re.search(r'/user/([A-Za-z0-9_-]+)', url)
+        if match:
+            return match.group(1)
+    elif platform == "kuaishou":
+        # https://www.kuaishou.com/profile/3x...
+        match = re.search(r'/profile/([A-Za-z0-9_-]+)', url)
+        if match:
+            return match.group(1)
+    elif platform == "xiaohongshu":
+        # https://www.xiaohongshu.com/user/profile/5f...
+        match = re.search(r'/user/profile/([A-Za-z0-9_-]+)', url)
+        if match:
+            return match.group(1)
+    elif platform == "bilibili":
+        # https://space.bilibili.com/123456
+        match = re.search(r'space\.bilibili\.com/(\d+)', url)
+        if match:
+            return match.group(1)
+    elif platform == "weibo":
+        # https://weibo.com/u/123456
+        match = re.search(r'weibo\.com/u/(\d+)', url)
+        if match:
+            return match.group(1)
+
+    # 回退：尝试提取 URL 最后一段路径
+    match = re.search(r'/([A-Za-z0-9_-]+)/?$', url.rstrip('/'))
+    if match:
+        return match.group(1)
+
+    return "unknown_user"
+
+
+def extract_browser_cookies(browser: str, domain: str) -> str:
+    """
+    从浏览器提取指定域名的 Cookie
+    按优先级尝试多种提取方式：
+    1. rookiepy（Rust实现，最可靠，Firefox无需管理员权限）
+    2. yt-dlp 内置的 Cookie 提取
+    3. browser_cookie3
+
+    注意：Chrome/Edge v127+ 引入了 App-Bound Encryption，
+    在 Windows 上非管理员权限无法解密 Cookie。
+    建议使用 Firefox 或手动导出 cookies.txt 文件。
+
+    Args:
+        browser: 浏览器名称 (chrome, firefox, edge, opera)
+        domain: 目标域名 (如 douyin.com, kuaishou.com)
+
+    Returns:
+        Cookie 字符串 (如 "key1=val1; key2=val2")
+
+    Raises:
+        RuntimeError: 如果提取失败
+    """
+    # 方式1: 使用 rookiepy（Rust实现，最可靠）
+    cookie_str = _extract_cookies_via_rookiepy(browser, domain)
+    if cookie_str:
+        return cookie_str
+
+    # 方式2: 使用 yt-dlp 内置的 Cookie 提取
+    cookie_str = _extract_cookies_via_ytdlp(browser, domain)
+    if cookie_str:
+        return cookie_str
+
+    # 方式3: 使用 browser_cookie3
+    cookie_str = _extract_cookies_via_browser_cookie3(browser, domain)
+    if cookie_str:
+        return cookie_str
+
+    raise RuntimeError(
+        f"无法从浏览器 {browser} 提取 {domain} 的 Cookie。\n\n"
+        f"可能的原因:\n"
+        f"  1. Chrome/Edge v127+ 使用了 App-Bound Encryption，非管理员无法解密\n"
+        f"  2. 浏览器未登录 {domain}\n"
+        f"  3. Cookie 已加密且无法解密\n\n"
+        f"替代方案:\n"
+        f"  1. 使用 Firefox: --browser-cookie firefox（Firefox 不受影响）\n"
+        f"  2. 使用浏览器扩展导出 cookies.txt 文件，放到项目根目录\n"
+        f"  3. 使用 --cookie 参数手动提供 Cookie\n"
+        f"  4. 以管理员权限运行本程序"
+    )
+
+
+def _extract_cookies_via_rookiepy(browser: str, domain: str) -> str:
+    """
+    使用 rookiepy 从浏览器提取 Cookie（首选方案）
+    rookiepy 是 Rust 实现的 Cookie 提取库，比 browser_cookie3 更可靠
+    注意：Chrome/Edge v127+ 在 Windows 上需要管理员权限
+    """
+    try:
+        import rookiepy
+    except ImportError:
+        return ""
+
+    browser_map = {
+        "chrome": rookiepy.chrome,
+        "firefox": rookiepy.firefox,
+        "edge": rookiepy.edge,
+        "opera": rookiepy.opera,
+    }
+
+    cookie_func = browser_map.get(browser.lower())
+    if not cookie_func:
+        return ""
+
+    try:
+        # rookiepy 需要 domain 前加 .
+        domain_pattern = f".{domain}" if not domain.startswith(".") else domain
+        cookies_list = cookie_func(domains=[domain_pattern])
+
+        if not cookies_list:
+            return ""
+
+        # rookiepy 返回 list[dict]，每个 dict 包含 name, value 等
+        cookie_parts = []
+        for c in cookies_list:
+            name = c.get("name", "")
+            value = c.get("value", "")
+            if name and value:
+                cookie_parts.append(f"{name}={value}")
+
+        if not cookie_parts:
+            return ""
+
+        return "; ".join(cookie_parts)
+
+    except Exception:
+        return ""
+
+
+def _extract_cookies_via_ytdlp(browser: str, domain: str) -> str:
+    """
+    使用 yt-dlp 内置的 Cookie 提取功能
+    yt-dlp 的实现比 browser_cookie3 更可靠，支持更多浏览器版本
+    """
+    import subprocess
+    import tempfile
+
+    try:
+        # 使用 yt-dlp 导出 Cookie 到 Netscape 格式文件
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+            cookie_file = f.name
+
+        # 构造一个测试URL来触发yt-dlp的Cookie提取
+        test_url = f"https://www.{domain}/"
+
+        cmd = [
+            "yt-dlp",
+            "--cookies-from-browser", browser,
+            "--cookies", cookie_file,
+            "--skip-download",
+            "--quiet",
+            "--no-warnings",
+            test_url,
+        ]
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=30,
+        )
+
+        # 即使 yt-dlp 下载失败，Cookie 文件可能已经生成
+        if os.path.exists(cookie_file):
+            cookie_str = _parse_netscape_cookie_file(cookie_file, domain)
+            try:
+                os.unlink(cookie_file)
+            except OSError:
+                pass
+            if cookie_str:
+                return cookie_str
+
+        return ""
+
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    except Exception:
+        return ""
+
+
+def _extract_cookies_via_browser_cookie3(browser: str, domain: str) -> str:
+    """
+    使用 browser_cookie3 从浏览器提取 Cookie（回退方案）
+    """
+    try:
+        import browser_cookie3
+    except ImportError:
+        return ""
+
+    browser_map = {
+        "chrome": browser_cookie3.chrome,
+        "firefox": browser_cookie3.firefox,
+        "edge": browser_cookie3.edge,
+        "opera": browser_cookie3.opera,
+    }
+
+    cookie_func = browser_map.get(browser.lower())
+    if not cookie_func:
+        return ""
+
+    try:
+        cj = cookie_func(domain_name=domain)
+        cookies = []
+        for c in cj:
+            cookies.append(f"{c.name}={c.value}")
+
+        if not cookies:
+            return ""
+
+        return "; ".join(cookies)
+
+    except Exception:
+        return ""
+
+
+def _parse_netscape_cookie_file(cookie_file: str, domain: str) -> str:
+    """
+    解析 Netscape 格式的 Cookie 文件，提取指定域名的 Cookie
+    返回 "key1=val1; key2=val2" 格式的字符串
+    """
+    cookies = []
+    # 去掉域名开头的点，用于匹配
+    domain_clean = domain.lstrip('.')
+
+    try:
+        with open(cookie_file, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) < 7:
+                    continue
+                cookie_domain = parts[0].lstrip('.')
+                # 匹配域名（支持子域名）
+                if cookie_domain == domain_clean or cookie_domain.endswith('.' + domain_clean) or domain_clean.endswith(cookie_domain):
+                    name = parts[5]
+                    value = parts[6]
+                    cookies.append(f"{name}={value}")
+    except Exception:
+        pass
+
+    return "; ".join(cookies)
+
+
+def load_cookies_from_file(domain: str) -> str:
+    """
+    从项目根目录的 cookies.txt 文件加载指定域名的 Cookie
+    cookies.txt 使用 Netscape 格式（与 yt-dlp 兼容）
+
+    Args:
+        domain: 目标域名
+
+    Returns:
+        Cookie 字符串，如果文件不存在或无匹配则返回空字符串
+    """
+    # 在项目根目录查找 cookies.txt
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    cookie_file = os.path.join(project_root, "cookies.txt")
+
+    if not os.path.exists(cookie_file):
+        return ""
+
+    cookie_str = _parse_netscape_cookie_file(cookie_file, domain)
+    return cookie_str
+
+
+def get_domain_for_platform(platform: str) -> str:
+    """获取平台对应的域名（用于Cookie提取）"""
+    domain_map = {
+        "douyin": "douyin.com",
+        "kuaishou": "kuaishou.com",
+        "xiaohongshu": "xiaohongshu.com",
+        "bilibili": "bilibili.com",
+        "weibo": "weibo.com",
+    }
+    return domain_map.get(platform, "")

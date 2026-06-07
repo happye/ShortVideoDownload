@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# __pycache__
+__pycache__/
+*/__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Downloads
+Downloads/
+output/
+
+# Config with sensitive data
+config.yaml
+
+# Cookie files (sensitive)
+cookies.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# f2 config
+.f2/
+
+# Logs
+logs/

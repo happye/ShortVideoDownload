@@ -1,0 +1,8 @@
+f2>=0.0.1.7
+yt-dlp>=2024.1.0
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+rich>=13.7.0
+pyyaml>=6.0
+browser-cookie3>=0.20.0
+rookiepy>=0.5.6

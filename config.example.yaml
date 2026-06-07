@@ -1,0 +1,44 @@
+# ShortVideoDownload 配置文件
+# 复制此文件为 config.yaml 并根据需要修改
+
+# 保存路径 (默认: 项目根目录/output)
+save_dir: "output"
+
+# 最大下载数量 (0=无限制)
+max_count: 0
+
+# 画质偏好: best / hd / sd
+quality: "best"
+
+# Cookie (部分平台必需)
+# cookie: "your_cookie_string"
+cookie: null
+
+# 从浏览器自动提取 Cookie (chrome/edge/firefox)
+# browser_cookie: "chrome"
+browser_cookie: null
+
+# 并发连接数
+max_connections: 5
+
+# 网络超时 (秒)
+timeout: 30
+
+# 重试次数
+max_retries: 3
+
+# 代理服务器 (留空则不使用)
+# proxies: "http://127.0.0.1:7890"
+proxies: null
+
+# 保存封面
+save_cover: true
+
+# 保存文案/描述
+save_desc: true
+
+# 保存视频原声
+save_music: false
+
+# 重名编号格式
+duplicate_format: "_{seq:03d}"
