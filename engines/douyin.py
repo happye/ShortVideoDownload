@@ -252,19 +252,38 @@ class DouyinEngine(BaseEngine):
                 if os.path.exists(filepath):
                     return DownloadResult(True, item, saved_paths=[filepath], skipped=True, skip_reason="已存在")
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        video_url, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=self.config.timeout),
-                        allow_redirects=True,
-                    ) as resp:
-                        if resp.status == 200:
-                            async with aiofiles.open(filepath, 'wb') as f:
-                                async for chunk in resp.content.iter_chunked(8192):
-                                    await f.write(chunk)
-                            saved_paths.append(filepath)
-                        else:
-                            return DownloadResult(False, item, error=f"HTTP {resp.status}")
+                # 下载视频（带重试，网络中断时自动重试）
+                max_retries = 3
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        # 删除上次失败的不完整文件
+                        if attempt > 0 and os.path.exists(filepath):
+                            os.remove(filepath)
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                video_url, headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=self.config.timeout, sock_read=30),
+                                allow_redirects=True,
+                            ) as resp:
+                                if resp.status == 200:
+                                    async with aiofiles.open(filepath, 'wb') as f:
+                                        async for chunk in resp.content.iter_chunked(8192):
+                                            await f.write(chunk)
+                                    saved_paths.append(filepath)
+                                    last_error = None
+                                    break
+                                else:
+                                    return DownloadResult(False, item, error=f"HTTP {resp.status}")
+                    except (aiohttp.ClientPayloadError, aiohttp.ClientOSError, ConnectionResetError, ConnectionError, asyncio.TimeoutError) as e:
+                        last_error = str(e)
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 * (attempt + 1))
+                if last_error:
+                    # 清理不完整文件
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    return DownloadResult(False, item, error=last_error)
 
             elif item.is_image:
                 # 检查图集是否已存在（检查第一张图）

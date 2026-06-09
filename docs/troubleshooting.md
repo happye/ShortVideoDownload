@@ -100,12 +100,32 @@
 ### Windows 中文乱码
 
 **CMD/PowerShell 中运行**：
-- `run.bat` 已配置编码切换，直接双击运行即可
+- `run.bat` 已配置 UTF-8 编码，直接双击运行即可
 - 手动运行时先执行 `chcp 65001`
 
 **Trae IDE 终端**：
 - Trae 终端自身的编码问题，不影响实际功能
 - 在 CMD/PowerShell 中运行正常
+
+---
+
+### 抖音 HTTP 403 下载失败
+
+**现象**：部分视频下载返回 HTTP 403
+
+**原因**：抖音 CDN 校验请求中的 Cookie，视频 URL 中的临时令牌过期后需要 Cookie 认证
+
+**解决**：已修复，下载请求自动携带 Cookie + 完整 User-Agent
+
+---
+
+### 抖音网络中断下载失败
+
+**现象**：`ContentLengthError: Not enough data` 或 `ConnectionResetError`
+
+**原因**：网络不稳定导致传输中断
+
+**解决**：已内置 3 次重试机制（指数退避 2s→4s→6s），自动清理不完整文件后重试
 
 ---
 

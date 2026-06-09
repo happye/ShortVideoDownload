@@ -25,8 +25,13 @@
 
 ### Windows 编码
 - `svd.py` 入口设置 `SetConsoleOutputCP(65001)` + 重包装 stdout/stderr 为 UTF-8
-- `run.bat` 用 GBK 编码保存，执行 Python 前后切换代码页（65001 ↔ 936）
+- `run.bat` 用 GBK 编码保存，不切换代码页（chcp 会导致终端刷新覆盖输出）
 - Trae IDE 终端中文乱码是 Trae 自身问题，不是代码问题
+
+### 抖音下载请求
+- 下载请求必须携带 Cookie + 完整 User-Agent，否则 CDN 返回 403
+- 视频下载带 3 次重试（网络中断/超时），指数退避 2s→4s→6s
+- 失败时清理不完整文件，避免残留
 
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）

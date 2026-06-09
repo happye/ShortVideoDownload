@@ -102,6 +102,9 @@ output/
 - f2 库处理 a_bogus 签名
 - 图集类型：`aweme_type == 150 或 151`
 - 视频地址可能是 `url_list` 数组，取第一个（最高画质）
+- **下载请求必须携带 Cookie + 完整 User-Agent**，抖音 CDN 会校验 Cookie，否则返回 403
+- 视频下载带 3 次重试（网络中断/超时），指数退避 2s→4s→6s
+- 失败时清理不完整文件
 
 ### 快手
 - GraphQL API 需要 `web_st` Cookie（session cookie，浏览器导出不包含）
