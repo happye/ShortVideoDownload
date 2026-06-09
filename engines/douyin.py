@@ -236,8 +236,10 @@ class DouyinEngine(BaseEngine):
         try:
             headers = {
                 "Referer": "https://www.douyin.com/",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
             }
+            if self._cookie:
+                headers["Cookie"] = self._cookie
 
             if item.is_video:
                 video_url = item.urls[0] if item.urls else ""
@@ -254,6 +256,7 @@ class DouyinEngine(BaseEngine):
                     async with session.get(
                         video_url, headers=headers,
                         timeout=aiohttp.ClientTimeout(total=self.config.timeout),
+                        allow_redirects=True,
                     ) as resp:
                         if resp.status == 200:
                             async with aiofiles.open(filepath, 'wb') as f:
@@ -276,6 +279,7 @@ class DouyinEngine(BaseEngine):
                         async with session.get(
                             img_url, headers=headers,
                             timeout=aiohttp.ClientTimeout(total=self.config.timeout),
+                            allow_redirects=True,
                         ) as resp:
                             if resp.status == 200:
                                 async with aiofiles.open(filepath, 'wb') as f:
