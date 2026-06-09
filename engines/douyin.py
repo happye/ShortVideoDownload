@@ -274,7 +274,11 @@ class DouyinEngine(BaseEngine):
                                     last_error = None
                                     break
                                 else:
-                                    return DownloadResult(False, item, error=f"HTTP {resp.status}")
+                                    last_error = f"HTTP {resp.status}"
+                                    if attempt < max_retries - 1:
+                                        await asyncio.sleep(2 * (attempt + 1))
+                                        continue
+                                    return DownloadResult(False, item, error=last_error)
                     except (aiohttp.ClientPayloadError, aiohttp.ClientOSError, ConnectionResetError, ConnectionError, asyncio.TimeoutError) as e:
                         last_error = str(e)
                         if attempt < max_retries - 1:

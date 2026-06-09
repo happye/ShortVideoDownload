@@ -303,3 +303,55 @@
 **修复方案**: `except RuntimeError` 中改为静默 `pass`，让 cookies.txt 回退成功后只显示成功信息。
 
 **修改文件**: `svd.py`
+
+---
+
+## 问题 #15: 抖音 HTTP 403 下载失败
+
+**状态**: 已修复 ✅
+
+**描述**: 部分抖音视频下载返回 HTTP 403，其他视频正常。
+
+**根因**: 下载请求未携带 Cookie。抖音视频 URL 包含临时访问令牌，令牌有效时 CDN 直接放行（无需 Cookie），令牌过期后 CDN 要求 Cookie 认证。之前大部分视频能下载是因为令牌还没过期。
+
+**修复方案**:
+- 下载请求头添加 Cookie + 完整 User-Agent（`Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0`）
+- 添加 `allow_redirects=True`
+
+**修改文件**: `engines/douyin.py`
+
+---
+
+## 问题 #16: 抖音网络中断下载失败
+
+**状态**: 已修复 ✅
+
+**描述**: 下载视频时出现 `ContentLengthError: Not enough data` 或 `ConnectionResetError`，视频只下载了一部分。
+
+**根因**: 网络不稳定导致传输中断。
+
+**修复方案**:
+- 视频下载带 3 次重试（捕获 `ClientPayloadError`、`ConnectionResetError`、`TimeoutError` 等）
+- 指数退避：2s → 4s → 6s
+- 重试前删除不完整文件
+- 添加 `sock_read=30` 读取超时
+
+**修改文件**: `engines/douyin.py`
+
+---
+
+## 问题 #17: run.bat 终端刷新覆盖输出
+
+**状态**: 已修复 ✅
+
+**描述**: 下载完成后返回 `SVD>` 提示符时，终端刷新覆盖了之前的输出内容。空输入时重复执行上一条命令。
+
+**根因**:
+1. `chcp 65001` / `chcp 936` 切换代码页会导致 CMD 刷新终端缓冲区
+2. `set /p` 空输入时 `%cmd%` 保留上一次的值
+
+**修复方案**:
+- 去掉 `chcp` 切换（Python 的 UTF-8 设置已足够）
+- 添加 `set "cmd="` + `if not defined cmd goto loop` 防止空输入重复执行
+
+**修改文件**: `run.bat`
