@@ -188,9 +188,9 @@ class BaseEngine(ABC):
         生成文件路径
         使用 item_id 作为文件名的一部分，确保同一作品不会重复下载
         """
-        from utils import sanitize_filename, truncate_desc
+        from utils import sanitize_filename, build_display_title
 
-        base_name = truncate_desc(item.title)
+        base_name = build_display_title(item.title)
         # 将 item_id 加入文件名，确保唯一性
         item_suffix = f"_{item.item_id}" if item.item_id else ""
 

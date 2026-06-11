@@ -10,17 +10,16 @@ from pathlib import Path
 def sanitize_filename(name: str, max_length: int = 200) -> str:
     """
     清理文件名，移除非法字符，截断过长的名字
+    注意：不使用 NFC 规范化，因为会破坏 emoji 的 ZWJ 序列
     """
-    # 移除 Windows 文件名非法字符
+    # 移除 Windows 文件名非法字符（保留 emoji 和 ZWJ 序列）
     illegal_chars = r'[<>:"/\\|?*\x00-\x1f]'
     name = re.sub(illegal_chars, '_', name)
     # 将连续空格替换为单个空格
     name = re.sub(r'\s+', ' ', name)
     # 移除首尾空格和点号
     name = name.strip(' .')
-    # 规范化 Unicode
-    name = unicodedata.normalize('NFC', name)
-    # 截断（保留扩展名空间）
+    # 截断（按 Unicode 字符数截断，避免截断 emoji 代理对）
     if len(name) > max_length:
         name = name[:max_length]
     # 空名回退
@@ -70,6 +69,50 @@ def truncate_desc(desc: str, max_len: int = 80) -> str:
     if len(first_line) > max_len:
         first_line = first_line[:max_len]
     return sanitize_filename(first_line) if first_line else "untitled"
+
+
+def build_display_title(desc: str, max_len: int = 80) -> str:
+    """
+    从抖音描述构建显示标题：主标题 + 副标题（标签）
+    - 主标题：描述中非 #标签 的文字
+    - 副标题：描述中的 #标签 内容（去掉 # 符号）
+    - 合并格式：主标题_副标题1_副标题2
+    - 若主标题为空，用副标题替代（不使用 untitled）
+    - 若副标题为空，只用主标题
+    """
+    if not desc:
+        return "untitled"
+
+    first_line = desc.split('\n')[0].strip()
+
+    # 按 # 分割：第一个 # 之前的是主标题，之后的是标签
+    parts = first_line.split('#')
+    main_title = parts[0].strip()
+    # 每个 # 后面的内容是一个标签（到下一个 # 或行尾）
+    tags = []
+    for part in parts[1:]:
+        tag = part.strip().rstrip('_')
+        if tag:
+            # 清理标签中的特殊字符（保留中文、字母、数字、下划线）
+            clean_tag = re.sub(r'[^\w\u4e00-\u9fff]', '', tag)
+            if clean_tag:
+                tags.append(clean_tag)
+
+    # 构建标题
+    if main_title and tags:
+        combined = main_title + '_' + '_'.join(tags)
+    elif tags:
+        combined = '_'.join(tags)
+    elif main_title:
+        combined = main_title
+    else:
+        return "untitled"
+
+    # 截断
+    if len(combined) > max_len:
+        combined = combined[:max_len]
+
+    return sanitize_filename(combined) if combined else "untitled"
 
 
 def format_file_size(size_bytes: int) -> str:

@@ -11,6 +11,7 @@
 - Cookie 提取逻辑只在 `utils.py`，引擎只接收 `config.cookie` 字符串
 - 文件名必须包含 `item_id` 后缀（`标题_itemId.mp4`），用于去重判断
 - `download_user()` 接受 `items` 参数避免重复 fetch
+- 文件命名用 `build_display_title()`（主标题+标签合并），不用 `truncate_desc()`
 
 ### 禁止事项
 - 不要用 `deduplicate_filepath()` 给同一视频加后缀——已下载的视频应跳过，不是重命名
