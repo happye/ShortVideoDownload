@@ -54,23 +54,6 @@ def ensure_dir(path: str) -> str:
     return path
 
 
-def truncate_desc(desc: str, max_len: int = 80) -> str:
-    """
-    截断描述文字用于文件名
-    取第一行，去除换行和特殊字符
-    """
-    if not desc:
-        return "untitled"
-    # 取第一行
-    first_line = desc.split('\n')[0].strip()
-    # 移除话题标签
-    first_line = re.sub(r'#\S+\s*', '', first_line).strip()
-    # 截断
-    if len(first_line) > max_len:
-        first_line = first_line[:max_len]
-    return sanitize_filename(first_line) if first_line else "untitled"
-
-
 def build_display_title(desc: str, max_len: int = 80) -> str:
     """
     从抖音描述构建显示标题：主标题 + 副标题（标签）
@@ -423,3 +406,49 @@ def get_domain_for_platform(platform: str) -> str:
         "weibo": "weibo.com",
     }
     return domain_map.get(platform, "")
+
+
+def suppress_f2_logging():
+    """
+    抑制 f2 库的冗余日志输出
+    f2 的日志有两个来源：
+    1. logging 系统（logger.info/error 等）—— 通过设置级别为 CRITICAL 抑制
+    2. rich_console.print() 直接输出 —— 通过 monkey-patch 替换为静默 Console 抑制
+    必须在 import f2 之后调用，否则 f2 的 log_setup() 会重置级别
+    """
+    import logging
+    import logging.handlers
+    import io
+
+    try:
+        from rich.console import Console as RichConsole
+    except ImportError:
+        RichConsole = None
+
+    # 先触发 f2 的 import（这会调用 log_setup() 设置级别为 INFO）
+    _f2_dy_handler = None
+    _f2_bark_handler = None
+    try:
+        import f2.apps.douyin.handler as _f2_dy_handler
+    except ImportError:
+        pass
+    try:
+        import f2.apps.bark.handler as _f2_bark_handler
+    except ImportError:
+        pass
+
+    # 抑制 logging 系统输出
+    f2_logger = logging.getLogger("f2")
+    f2_logger.setLevel(logging.CRITICAL)
+    for handler in f2_logger.handlers[:]:
+        if not isinstance(handler, logging.handlers.TimedRotatingFileHandler):
+            handler.setLevel(logging.CRITICAL)
+
+    # 抑制 rich_console.print() 直接输出
+    _silent_console = None
+    if RichConsole is not None:
+        _silent_console = RichConsole(file=io.StringIO(), width=80, no_color=True)
+    if _f2_dy_handler and _silent_console:
+        _f2_dy_handler.rich_console = _silent_console
+    if _f2_bark_handler and _silent_console:
+        _f2_bark_handler.rich_console = _silent_console

@@ -15,56 +15,7 @@ from typing import List, Optional
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig, load_f2_config
-
-try:
-    from rich.console import Console as RichConsole
-except ImportError:
-    RichConsole = None
-
-
-def _suppress_f2_logging():
-    """
-    抑制 f2 库的冗余日志输出
-    f2 的日志有两个来源：
-    1. logging 系统（logger.info/error 等）—— 通过设置级别为 WARNING 抑制
-    2. rich_console.print() 直接输出 —— 通过 monkey-patch 替换为静默 Console 抑制
-    必须在 import f2 之后调用，否则 f2 的 log_setup() 会重置级别
-    """
-    # 0. 先触发 f2 的 import（这会调用 log_setup() 设置级别为 INFO）
-    # 必须在设置级别之前 import，否则 log_setup() 会覆盖我们的设置
-    _f2_dy_handler = None
-    _f2_bark_handler = None
-    try:
-        import f2.apps.douyin.handler as _f2_dy_handler
-    except ImportError:
-        pass
-    try:
-        import f2.apps.bark.handler as _f2_bark_handler
-    except ImportError:
-        pass
-
-    # 1. 抑制 logging 系统输出（在 f2 log_setup() 之后设置，避免被覆盖）
-    # 设置为 CRITICAL 级别，抑制所有 INFO/WARNING/ERROR 消息
-    # f2 的 INFO 消息（处理用户、等待、页数）和 ERROR 消息（Bark通知失败）对用户无意义
-    f2_logger = logging.getLogger("f2")
-    f2_logger.setLevel(logging.CRITICAL)
-    # 设置所有 handler 的级别为 CRITICAL
-    for handler in f2_logger.handlers[:]:
-        if not isinstance(handler, logging.handlers.TimedRotatingFileHandler):
-            handler.setLevel(logging.CRITICAL)
-
-    # 2. 抑制 rich_console.print() 直接输出
-    # f2 在 handler 模块级别创建了 rich_console = RichConsoleManager().rich_console
-    # 将其替换为写入 StringIO 的静默 Console
-    _silent_console = None
-    if RichConsole is not None:
-        _silent_console = RichConsole(file=io.StringIO(), width=80, no_color=True)
-    if _f2_dy_handler and _silent_console:
-        _f2_dy_handler.rich_console = _silent_console
-
-    # 3. 抑制 Bark 通知控制台输出
-    if _f2_bark_handler and _silent_console:
-        _f2_bark_handler.rich_console = _silent_console
+from utils import suppress_f2_logging
 
 
 class DouyinEngine(BaseEngine):
@@ -105,7 +56,7 @@ class DouyinEngine(BaseEngine):
             from f2.apps.douyin.utils import ClientConfManager
             from f2.apps.douyin.utils import SecUserIdFetcher
             # f2 import 后立即抑制其日志输出
-            _suppress_f2_logging()
+            suppress_f2_logging()
         except ImportError:
             raise RuntimeError(
                 "f2 库未安装，请运行: pip install f2\n"
@@ -152,9 +103,15 @@ class DouyinEngine(BaseEngine):
             nicknames = aweme_data.nickname
             create_times = aweme_data.create_time
             video_urls = aweme_data.video_play_addr
+            # 备用视频URL: video.play_addr（bit_rate为空时的回退）
+            video_play_addr_fallback = aweme_data._get_list_attr_value(
+                "$.aweme_list[*].video.play_addr.url_list"
+            )
             images_list = aweme_data.images
             cover_urls = aweme_data.cover
             music_urls = aweme_data.music_play_url
+            # 获取音乐标题作为空描述的回退
+            music_titles = getattr(aweme_data, 'music_title_raw', None) or getattr(aweme_data, 'music_title', None)
 
             # 确保都是列表
             if not isinstance(aweme_ids, list):
@@ -175,16 +132,26 @@ class DouyinEngine(BaseEngine):
                 cover_urls = [cover_urls]
             if not isinstance(music_urls, list):
                 music_urls = [music_urls]
+            if not isinstance(music_titles, list):
+                music_titles = [music_titles] if music_titles is not None else []
 
             count = len(aweme_ids)
 
             for i in range(count):
                 aweme_id = aweme_ids[i] if i < len(aweme_ids) else ""
                 desc = descs[i] if i < len(descs) else ""
+                # desc 为空时用音乐标题回退（与 fix_names.py 保持一致）
+                if not desc and i < len(music_titles):
+                    music = music_titles[i]
+                    if music and music != "原声":
+                        desc = f"#{music}"
                 aweme_type = types[i] if i < len(types) else 0
                 nickname = nicknames[i] if i < len(nicknames) else ""
                 create_time = create_times[i] if i < len(create_times) else ""
                 video_url_list = video_urls[i] if i < len(video_urls) else []
+                # 当 bit_rate 为空时，回退到 video.play_addr
+                if not video_url_list and i < len(video_play_addr_fallback):
+                    video_url_list = video_play_addr_fallback[i]
                 images = images_list[i] if i < len(images_list) else None
                 cover_url = cover_urls[i] if i < len(cover_urls) else None
                 music_url = music_urls[i] if i < len(music_urls) else None
@@ -205,6 +172,10 @@ class DouyinEngine(BaseEngine):
                     else:
                         urls = []
 
+                # 跳过既无视频URL也无图片URL的条目（非视频非图集的条目）
+                if not urls:
+                    continue
+
                 # 过滤
                 if self.config.video_only and item_type != "video":
                     continue
@@ -214,7 +185,7 @@ class DouyinEngine(BaseEngine):
                 item = DownloadItem(
                     item_id=str(aweme_id),
                     item_type=item_type,
-                    title=desc or f"douyin_{aweme_id}",
+                    title=desc or f"video_{aweme_id}",
                     urls=[u for u in urls if u],
                     create_time=str(create_time),
                     nickname=nickname,
@@ -249,11 +220,12 @@ class DouyinEngine(BaseEngine):
                 filepath = self._make_filepath(save_dir, item, ".mp4")
 
                 # 检查文件是否已存在（同一 item_id 的视频）
-                if os.path.exists(filepath):
+                # 跳过 0 字节文件（上次下载中断的残留）
+                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                     return DownloadResult(True, item, saved_paths=[filepath], skipped=True, skip_reason="已存在")
 
                 # 下载视频（带重试，网络中断时自动重试）
-                max_retries = 3
+                max_retries = self.config.max_retries
                 last_error = None
                 for attempt in range(max_retries):
                     try:

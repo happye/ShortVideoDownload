@@ -44,10 +44,6 @@ if sys.platform == "win32":
 # 将项目根目录加入 sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 抑制 f2 库的冗余日志（必须在 import f2 之前设置）
-import logging
-logging.getLogger("f2").setLevel(logging.CRITICAL)
-
 from config import DownloadConfig, PLATFORM_PATTERNS
 from utils import detect_platform, extract_user_id, format_file_size
 from engines import ENGINES
@@ -164,9 +160,9 @@ def parse_args():
         help="不保存封面"
     )
     parser.add_argument(
-        "--no-desc",
+        "--desc",
         action="store_true",
-        help="不保存文案"
+        help="保存文案描述"
     )
     parser.add_argument(
         "--music",
@@ -241,8 +237,8 @@ def build_config(args) -> DownloadConfig:
         cfg.proxies = args.proxy
     if args.no_cover:
         cfg.save_cover = False
-    if args.no_desc:
-        cfg.save_desc = False
+    if args.desc:
+        cfg.save_desc = True
     if args.music:
         cfg.save_music = True
     if args.max_connections:

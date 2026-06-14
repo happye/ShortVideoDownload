@@ -34,6 +34,11 @@
 - 视频下载带 3 次重试（网络中断/超时），指数退避 2s→4s→6s
 - 失败时清理不完整文件，避免残留
 
+### 抖音视频URL回退
+- f2 的 `video_play_addr` 只映射 `bit_rate[0].play_addr.url_list`，部分视频 `bit_rate` 为空
+- 当 `bit_rate` 为空时，必须回退到 `video.play_addr.url_list`（直接播放地址）
+- 无 URL 的条目（非视频非图集）应跳过，不加入下载队列
+
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
 2. `cookies.txt` 文件回退（Netscape 格式，按域名自动筛选）
@@ -68,8 +73,11 @@ python svd.py "URL" --dry-run
 # 限制数量
 python svd.py "URL" -n 10
 
-# 运行测试
-python svd.py "URL" --dry-run
+# 重命名 untitled 文件（预览）
+python fix_names.py "用户URL" "output/douyin/用户目录" --dry-run
+
+# 重命名 untitled 文件（执行）
+python fix_names.py "用户URL" "output/douyin/用户目录"
 ```
 
 ## 平台状态

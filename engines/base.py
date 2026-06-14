@@ -168,8 +168,8 @@ class BaseEngine(ABC):
             return existing
 
         for filename in os.listdir(save_dir):
-            # 跳过封面和描述文件
-            if filename.endswith('_cover.jpg') or filename.endswith('.txt'):
+            # 跳过封面、描述、音乐文件（只从主文件提取 item_id）
+            if filename.endswith('_cover.jpg') or filename.endswith('.txt') or filename.endswith('.mp3'):
                 continue
             # 从文件名中提取可能的 item_id
             # 文件名可能是: title_itemId.mp4 或 title_itemId_001.jpg
@@ -192,7 +192,12 @@ class BaseEngine(ABC):
 
         base_name = build_display_title(item.title)
         # 将 item_id 加入文件名，确保唯一性
-        item_suffix = f"_{item.item_id}" if item.item_id else ""
+        # item_id 为空时用时间戳+随机数避免覆盖
+        if item.item_id:
+            item_suffix = f"_{item.item_id}"
+        else:
+            import time
+            item_suffix = f"_{int(time.time() * 1000) % 100000}"
 
         if item.is_image and idx > 0:
             filename = f"{base_name}{item_suffix}_{idx:03d}{ext}"
@@ -201,10 +206,6 @@ class BaseEngine(ABC):
 
         filename = sanitize_filename(filename)
         filepath = os.path.join(save_dir, filename)
-
-        # 如果文件已存在，说明已下载，直接返回（download_item 中会检查并跳过）
-        if os.path.exists(filepath):
-            return filepath
 
         return filepath
 

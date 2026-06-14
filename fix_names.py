@@ -39,7 +39,7 @@ if sys.platform == "win32":
             except Exception:
                 pass
 
-from utils import build_display_title, sanitize_filename, load_cookies_from_file
+from utils import build_display_title, sanitize_filename, load_cookies_from_file, suppress_f2_logging
 
 
 def extract_item_id_from_filename(filename: str) -> str:
@@ -102,6 +102,7 @@ def find_rename_candidates(directory: str) -> dict:
 async def fetch_user_titles(user_url: str) -> dict:
     """
     爬取用户主页，获取 {item_id: desc} 的映射
+    当 desc 为空时，使用 music_title_raw 作为回退
     """
     # 加载 Cookie
     cookie = load_cookies_from_file("douyin.com")
@@ -113,30 +114,8 @@ async def fetch_user_titles(user_url: str) -> dict:
         print("错误: f2 库未安装，请运行: pip install f2")
         return {}
 
-    # 抑制 f2 日志
-    import logging
-    import logging.handlers
-    import io
-    try:
-        from rich.console import Console as RichConsole
-    except ImportError:
-        RichConsole = None
-
-    f2_logger = logging.getLogger("f2")
-    f2_logger.setLevel(logging.CRITICAL)
-    for handler in f2_logger.handlers[:]:
-        if not isinstance(handler, logging.handlers.TimedRotatingFileHandler):
-            handler.setLevel(logging.CRITICAL)
-
-    _silent_console = None
-    if RichConsole is not None:
-        _silent_console = RichConsole(file=io.StringIO(), width=80, no_color=True)
-    try:
-        import f2.apps.douyin.handler as _f2_dy_handler
-        if _silent_console:
-            _f2_dy_handler.rich_console = _silent_console
-    except ImportError:
-        pass
+    # 抑制 f2 日志（使用 utils 中的统一函数）
+    suppress_f2_logging()
 
     # 获取 sec_user_id
     sec_uid = await SecUserIdFetcher.get_sec_user_id(user_url)
@@ -155,15 +134,24 @@ async def fetch_user_titles(user_url: str) -> dict:
 
         aweme_ids = aweme_data.aweme_id
         descs = aweme_data.desc
+        # 获取音乐标题作为回退
+        music_titles = getattr(aweme_data, 'music_title_raw', None) or getattr(aweme_data, 'music_title', None)
 
         if not isinstance(aweme_ids, list):
             aweme_ids = [aweme_ids]
         if not isinstance(descs, list):
             descs = [descs]
+        if not isinstance(music_titles, list):
+            music_titles = [music_titles] if music_titles is not None else []
 
         for i in range(len(aweme_ids)):
             item_id = str(aweme_ids[i])
             desc = descs[i] if i < len(descs) else ""
+            # desc 为空时用音乐标题回退
+            if not desc and i < len(music_titles):
+                music = music_titles[i]
+                if music and music != "原声":
+                    desc = f"#{music}"
             title_map[item_id] = desc
 
     return title_map
@@ -180,17 +168,17 @@ def rename_files(candidates: dict, title_map: dict, directory: str, dry_run: boo
     failed = 0
 
     for item_id, filepaths in sorted(candidates.items()):
-        desc = title_map.get(item_id)
-
-        if not desc:
+        if item_id not in title_map:
             for fp in filepaths:
-                msg = f"[跳过] {os.path.basename(fp)} -> 无法匹配到标题（爬取结果中无此 item_id）"
+                msg = f"[跳过] {os.path.basename(fp)} -> 无法匹配（爬取结果中无此 item_id）"
                 logs.append(msg)
                 skipped += 1
             continue
 
-        new_base = build_display_title(desc)
-        new_suffix = f"_{item_id}"
+        desc = title_map[item_id]
+        # 描述为空时用 item_id 作为标题
+        new_base = build_display_title(desc) if desc else f"video_{item_id}"
+        new_suffix = "" if not desc else f"_{item_id}"
 
         for old_path in filepaths:
             old_name = os.path.basename(old_path)
