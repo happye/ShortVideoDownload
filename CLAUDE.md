@@ -39,13 +39,25 @@
 - 当 `bit_rate` 为空时，必须回退到 `video.play_addr.url_list`（直接播放地址）
 - 无 URL 的条目（非视频非图集）应跳过，不加入下载队列
 
+### 小红书引擎（Playwright）
+- 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
+- 必须用 Playwright 真实浏览器环境获取数据（stealth 模式 + cookie 注入）
+- 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
+  - 笔记列表：`userStore.notes[0]`，每条含 `id`/`noteCard.noteId`/`xsecToken`
+  - 笔记详情：`noteStore.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
+- 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
+- 翻页：滚动页面到底部，Pinia store 自动追加笔记（最多 30 次滚动）
+- `max_count` 在获取详情前应用，避免不必要地获取所有详情
+- 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
+
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
 2. `cookies.txt` 文件回退（Netscape 格式，按域名自动筛选）
 3. `--cookie` 手动提供
 
 ### 去重机制
-- `_scan_existing_items()` 扫描目录，从文件名提取 item_id（≥10位纯数字）
+- `_scan_existing_items()` 扫描目录，从文件名提取 item_id
+- 抖音 item_id：≥10 位纯数字；小红书 note_id：24 位十六进制字符串
 - `download_item()` 检查目标文件是否已存在
 - 已存在 → 返回 `skipped=True`，不下载不重命名
 

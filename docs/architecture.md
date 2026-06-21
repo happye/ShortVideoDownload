@@ -11,7 +11,7 @@
 
 ## 双引擎架构
 
-项目使用两套下载引擎：
+项目使用三套下载引擎：
 
 ### 1. f2 引擎（抖音专用）
 
@@ -21,9 +21,18 @@
 - **下载文件**：`aiohttp` 直接下载视频/图片流
 - **日志抑制**：f2 的 `log_setup()` 在 import 时初始化 logger（INFO 级别 + RichHandler），需要 monkey-patch `rich_console` + 设置 CRITICAL 级别
 
-### 2. yt-dlp + 自研 API（其他平台）
+### 2. Playwright 引擎（小红书专用）
 
-快手、小红书、B站、微博使用自研 API 获取作品列表，yt-dlp 负责实际下载。
+小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空。因此使用 Playwright 真实浏览器环境获取数据。
+
+- **获取列表**：Playwright 访问用户主页，从 Vue 3 Pinia store 提取笔记列表，滚动加载翻页
+- **获取详情**：Playwright 访问笔记详情页，从 Pinia store 提取视频/图片 URL
+- **下载文件**：`aiohttp` 直接下载视频/图片流（与抖音一致）
+- **stealth 模式**：隐藏 webdriver 特征，注入 cookie
+
+### 3. yt-dlp + 自研 API（其他平台）
+
+快手、B站、微博使用自研 API 获取作品列表，yt-dlp 负责实际下载。
 
 - **获取列表**：各平台引擎自行实现 `fetch_user_items()`
 - **下载文件**：调用 `yt-dlp` 命令行工具，通过 `--cookies` 传递 Cookie

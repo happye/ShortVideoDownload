@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 
@@ -27,17 +28,15 @@ echo.
 set "cmd="
 set /p "cmd=SVD> "
 
-REM 空输入则重新等待（防止重复执行上一条命令）
-if not defined cmd goto loop
+REM 用延迟展开安全比较（防止 & 被解析）
+if /i "!cmd!"=="q" goto :eof
+if /i "!cmd!"=="quit" goto :eof
+if /i "!cmd!"=="exit" goto :eof
+if /i "!cmd!"=="h" call :show_help & goto loop
+if /i "!cmd!"=="help" call :show_help & goto loop
 
-if /i "%cmd%"==q goto :eof
-if /i "%cmd%"==quit goto :eof
-if /i "%cmd%"==exit goto :eof
-if /i "%cmd%"==h call :show_help & goto loop
-if /i "%cmd%"==help call :show_help & goto loop
-
-REM 执行 svd.py 命令
-python svd.py %cmd%
+REM 执行 svd.py 命令（使用延迟展开防止 URL 中的 & 被解析为命令分隔符）
+python svd.py !cmd!
 goto loop
 
 REM === 帮助信息 ===

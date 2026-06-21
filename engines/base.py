@@ -3,6 +3,7 @@ ShortVideoDownload - 下载引擎基类
 定义所有平台下载引擎的统一接口
 """
 import os
+import re
 import sys
 import asyncio
 from abc import ABC, abstractmethod
@@ -174,11 +175,12 @@ class BaseEngine(ABC):
             # 从文件名中提取可能的 item_id
             # 文件名可能是: title_itemId.mp4 或 title_itemId_001.jpg
             name_without_ext = os.path.splitext(filename)[0]
-            # 尝试提取最后一段作为 item_id（通常是很长的数字ID）
+            # 尝试提取最后一段作为 item_id
             parts = name_without_ext.split('_')
             for part in reversed(parts):
                 # 抖音/B站的 item_id 通常是纯数字且较长
-                if len(part) >= 10 and part.isdigit():
+                # 小红书的 note_id 是 24 位十六进制字符串
+                if len(part) >= 10 and (part.isdigit() or re.match(r'^[0-9a-f]{20,}$', part)):
                     existing.add(part)
                     break
         return existing
