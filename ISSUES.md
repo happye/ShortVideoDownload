@@ -2,6 +2,27 @@
 
 ## 修改记录
 
+### 2026-06-25 抖音 HTTP 400 Cookie Too Large 修复
+
+- 问题 #27: 抖音视频下载报 HTTP 400 → 已修复
+  - 错误信息: `400 Request Header Or Cookie Too Large`
+  - 根因: 用户 Cookie 异常庞大（12200 字符 / 134 个字段，是正常 Cookie 的 10 倍），Nginx 的 `large_client_header_buffers` 默认 8KB，超过就报 400
+  - 关键发现: 抖音视频/图片/封面/音乐的 CDN URL（v*-web*.douyinvod.com）**不需要 Cookie 鉴权**，仅靠 URL 中的临时令牌即可访问
+  - 之前的逻辑: 下载请求带完整 Cookie → 大 Cookie 触发 Nginx 400 → 部分视频下载失败
+  - 修复方案: `download_item` 中下载视频/图片/封面/音乐时不发送 Cookie，仅保留 Referer + User-Agent
+  - 验证: 22 个视频不带 Cookie 全部下载成功（包括 12 MB 大文件），端到端测试 3 个视频全部成功
+  - 注意: `fetch_user_items`（API 调用）仍需要 Cookie，只是 CDN 下载不需要
+
+### 2026-06-25 新增单视频链接下载功能
+
+- 问题 #28: 支持单视频链接下载 → 已实现
+  - 需求: 给出单个视频链接 → 自动识别平台 → 按作者用户名目录存放 → 跳过已存在（先做抖音）
+  - 实现:
+    - `utils.detect_single_video(url)` 识别 4 种抖音 URL 格式（`?modal_id=`、`/video/{id}`、`/note/{id}`、`iesdouyin.com/share/video/{id}`），返回 `(platform, video_id)` 或 `(None, None)`
+    - `engines/douyin.py` 新增 `fetch_single_item(video_id)`，调用 f2 的 `DouyinHandler.fetch_one_video(aweme_id)` 返回单个 `DownloadItem`
+    - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
+  - 验证: 6 种 URL 格式识别全部正确（含 modal_id、/video/、/note/、iesdouyin、无 modal_id 的用户主页应返回 None）；视频 7539162803471846698 实际下载到 `output\douyin\刘小菲\` 目录（1.7MB + 封面），作者按 URL 中 sec_uid 解析得到，与文件名中 item_id 后缀一致
+
 ### 2026-06-25 小红书反爬规避
 
 - 问题 #26: 小红书批量下载触发官方警告 → 已修复（全面重构规避策略）

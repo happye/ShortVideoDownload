@@ -197,6 +197,103 @@ class DouyinEngine(BaseEngine):
 
         return items
 
+    async def fetch_single_item(self, video_id: str) -> Optional[DownloadItem]:
+        """
+        获取单个抖音作品详情（用于单视频链接下载）
+        Args:
+            video_id: aweme_id（抖音视频 ID）
+        Returns:
+            DownloadItem 或 None（失败时）
+        """
+        try:
+            from f2.apps.douyin.handler import DouyinHandler
+            from f2.apps.douyin.utils import ClientConfManager
+            suppress_f2_logging()
+        except ImportError:
+            raise RuntimeError(
+                "f2 库未安装，请运行: pip install f2\n"
+                "详见: https://github.com/Johnserf-Seed/f2"
+            )
+
+        if not self._cookie:
+            raise RuntimeError(
+                "抖音需要登录 Cookie 才能获取作品详情。\n"
+                "请使用 --cookie 参数或 cookies.txt 文件提供 Cookie。"
+            )
+
+        # 构建 kwargs（使用 f2 默认配置 + 用户 Cookie）
+        kwargs = dict(ClientConfManager.client_conf.get("douyin", {}))
+        kwargs["cookie"] = self._cookie or ""
+        if self.config.proxies:
+            proxy = self.config.proxies
+            kwargs["proxies"] = {"http://": proxy, "https://": proxy}
+
+        handler = DouyinHandler(kwargs)
+
+        # 调用 f2 获取单视频详情
+        try:
+            aweme_data = await handler.fetch_one_video(str(video_id))
+        except Exception as e:
+            raise RuntimeError(f"获取抖音视频 {video_id} 详情失败: {e}")
+
+        # 提取字段（PostDetailFilter 的属性）
+        aweme_id = str(aweme_data.aweme_id or video_id)
+        desc = aweme_data.desc or ""
+        aweme_type = aweme_data.aweme_type or 0
+        nickname = aweme_data.nickname or "unknown"
+        create_time = str(aweme_data.create_time or "")
+        video_url_list = aweme_data.video_play_addr or []
+        # 备用：bit_rate 为空时回退到 video.play_addr
+        if not video_url_list:
+            video_url_list = aweme_data._get_list_attr_value(
+                "$.aweme_detail.video.play_addr.url_list"
+            ) or []
+        images = aweme_data.images or []
+        cover_url = aweme_data.cover or None
+        music_url = aweme_data.music_play_url or None
+
+        # 音乐标题作为空描述的回退
+        if not desc:
+            music_title = getattr(aweme_data, 'music_title_raw', None) or getattr(aweme_data, 'music_title', None)
+            if music_title and music_title != "原声":
+                desc = f"#{music_title}"
+
+        # 判断类型: aweme_type=68/150/151 为图集
+        is_image_set = (aweme_type in (68, 150, 151)) or (images and not video_url_list)
+
+        if is_image_set:
+            item_type = "image"
+            urls = images if images else []
+        else:
+            item_type = "video"
+            if isinstance(video_url_list, list) and video_url_list:
+                urls = video_url_list[:1]
+            elif isinstance(video_url_list, str):
+                urls = [video_url_list]
+            else:
+                urls = []
+
+        if not urls:
+            return None
+
+        # 过滤（与 fetch_user_items 保持一致）
+        if self.config.video_only and item_type != "video":
+            return None
+        if self.config.image_only and item_type != "image":
+            return None
+
+        return DownloadItem(
+            item_id=aweme_id,
+            item_type=item_type,
+            title=desc or f"video_{aweme_id}",
+            urls=[u for u in urls if u],
+            create_time=create_time,
+            nickname=nickname,
+            cover_url=cover_url,
+            music_url=music_url,
+            description=desc,
+        )
+
     async def download_item(self, item: DownloadItem, save_dir: str) -> DownloadResult:
         """下载单个抖音作品（HTTP 直接下载）"""
         import aiohttp
@@ -205,12 +302,13 @@ class DouyinEngine(BaseEngine):
         saved_paths = []
 
         try:
+            # 抖音视频/图片/封面/音乐的 CDN URL 不需要 Cookie 鉴权
+            # 完整 Cookie 通常 >10KB（含 100+ 字段），会触发 Nginx "400 Request Header Or Cookie Too Large"
+            # 仅保留 Referer 和 User-Agent 即可稳定下载
             headers = {
                 "Referer": "https://www.douyin.com/",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
             }
-            if self._cookie:
-                headers["Cookie"] = self._cookie
 
             if item.is_video:
                 video_url = item.urls[0] if item.urls else ""

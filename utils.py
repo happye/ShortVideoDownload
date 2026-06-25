@@ -122,6 +122,41 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
+def detect_single_video(url: str) -> tuple:
+    """
+    检测 URL 是否是单个视频/作品链接
+    返回 (platform, video_id) 或 (None, None)
+
+    支持的抖音格式:
+      - https://www.douyin.com/user/{sec_uid}?modal_id={aweme_id}  (用户主页弹窗)
+      - https://www.douyin.com/video/{aweme_id}
+      - https://www.douyin.com/note/{aweme_id}    (图集笔记)
+      - https://www.iesdouyin.com/share/video/{aweme_id}
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    platform = detect_platform(url)
+    if platform == "douyin":
+        # 1. modal_id 参数（用户主页弹窗模式）
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        if params.get('modal_id'):
+            return ("douyin", params['modal_id'][0])
+        # 2. /video/{aweme_id} 路径
+        m = re.search(r'/video/(\d+)', url)
+        if m:
+            return ("douyin", m.group(1))
+        # 3. /note/{aweme_id} 路径（图集）
+        m = re.search(r'/note/(\d+)', url)
+        if m:
+            return ("douyin", m.group(1))
+        # 4. iesdouyin share
+        m = re.search(r'iesdouyin\.com/share/video/(\d+)', url)
+        if m:
+            return ("douyin", m.group(1))
+    return (None, None)
+
+
 def extract_user_id(url: str, platform: str) -> str:
     """
     从 URL 中提取用户 ID

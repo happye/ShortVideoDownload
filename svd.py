@@ -404,17 +404,40 @@ async def run_download(url: str, config: DownloadConfig, mode: str, dry_run: boo
 
     start_time = datetime.now()
 
-    if dry_run:
-        # 仅列出作品
-        if RICH_AVAILABLE:
+    # 检测是否单视频链接
+    from utils import detect_single_video
+    single_platform, video_id = detect_single_video(url)
+    is_single = single_platform is not None
+
+    # 获取作品列表（单视频 or 用户主页）
+    if RICH_AVAILABLE:
+        if is_single:
+            console.print(f"[bold green]> 检测到单视频链接，正在获取视频详情 (ID={video_id})...[/bold green]")
+        else:
             console.print("[bold green]> 正在获取作品列表...[/bold green]")
+    else:
+        if is_single:
+            print(f"检测到单视频链接，正在获取视频详情 (ID={video_id})...")
         else:
             print("正在获取作品列表...")
 
+    if is_single:
+        item = await engine.fetch_single_item(video_id)
+        items = [item] if item else []
+    else:
         items = await engine.fetch_user_items(url)
 
+    if not items:
         if RICH_AVAILABLE:
-            table = Table(title=f"| {platform} 用户作品列表 (共 {len(items)} 个)")
+            console.print("[yellow]! 未找到任何作品[/yellow]")
+        else:
+            print("未找到任何作品")
+        return
+
+    if dry_run:
+        # 仅列出作品
+        if RICH_AVAILABLE:
+            table = Table(title=f"| {platform} 作品列表 (共 {len(items)} 个)")
             table.add_column("#", style="dim", width=4)
             table.add_column("类型", width=6)
             table.add_column("标题", max_width=60)
@@ -434,21 +457,6 @@ async def run_download(url: str, config: DownloadConfig, mode: str, dry_run: boo
             for idx, item in enumerate(items, 1):
                 print(f"  {idx}. [{item.item_type}] {item.title[:60]}")
 
-        return
-
-    # 获取作品列表
-    if RICH_AVAILABLE:
-        console.print("[bold green]> 正在获取作品列表...[/bold green]")
-    else:
-        print("正在获取作品列表...")
-
-    items = await engine.fetch_user_items(url)
-
-    if not items:
-        if RICH_AVAILABLE:
-            console.print("[yellow]! 未找到任何作品[/yellow]")
-        else:
-            print("未找到任何作品")
         return
 
     # 执行下载

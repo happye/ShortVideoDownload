@@ -30,9 +30,16 @@
 - Trae IDE 终端中文乱码是 Trae 自身问题，不是代码问题
 
 ### 抖音下载请求
-- 下载请求必须携带 Cookie + 完整 User-Agent，否则 CDN 返回 403
+- **下载请求不发送 Cookie**：抖音视频/图片/封面/音乐的 CDN URL（v*-web*.douyinvod.com）不需要 Cookie 鉴权，仅靠 URL 临时令牌即可访问；完整 Cookie 通常 >10KB（100+ 字段），会触发 Nginx `large_client_header_buffers` 8KB 限制报 `400 Request Header Or Cookie Too Large`
+- 下载请求必须携带 Referer + 完整 User-Agent
 - 视频下载带 3 次重试（网络中断/超时），指数退避 2s→4s→6s
 - 失败时清理不完整文件，避免残留
+- 注意：`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie（API 域名需要鉴权，CDN 域名不需要）
+
+### 单视频链接下载
+- `utils.detect_single_video(url)` 识别 4 种抖音 URL 格式：`?modal_id=`、`/video/{id}`、`/note/{id}`、`iesdouyin.com/share/video/{id}`
+- 引擎实现 `fetch_single_item(video_id)`：调用 f2 的 `fetch_one_video(aweme_id)` 返回单个 DownloadItem
+- `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
 
 ### 抖音视频URL回退
 - f2 的 `video_play_addr` 只映射 `bit_rate[0].play_addr.url_list`，部分视频 `bit_rate` 为空

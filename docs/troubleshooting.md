@@ -119,6 +119,16 @@
 
 ---
 
+### 抖音 HTTP 400 Request Header Or Cookie Too Large
+
+**现象**：部分视频下载返回 HTTP 400，错误信息 `Request Header Or Cookie Too Large`
+
+**原因**：用户 Cookie 异常庞大（>10KB / 100+ 字段），超过 Nginx `large_client_header_buffers` 默认 8KB 限制。抖音视频/图片/封面/音乐的 CDN URL 不需要 Cookie 鉴权，仅靠 URL 临时令牌即可访问，但旧代码下载时携带完整 Cookie，反而触发 Nginx 400。
+
+**解决**：已修复，`download_item` 中下载视频/图片/封面/音乐时不发送 Cookie，仅保留 Referer + User-Agent。`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie。
+
+---
+
 ### 抖音网络中断下载失败
 
 **现象**：`ContentLengthError: Not enough data` 或 `ConnectionResetError`

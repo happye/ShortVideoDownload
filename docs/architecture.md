@@ -133,9 +133,30 @@ output/
 - 图集类型：`aweme_type == 150 或 151`
 - 视频地址可能是 `url_list` 数组，取第一个（最高画质）
 - **视频URL回退**：f2 只映射 `bit_rate[0].play_addr`，部分视频 `bit_rate` 为空时回退到 `video.play_addr`
-- **下载请求必须携带 Cookie + 完整 User-Agent**，抖音 CDN 会校验 Cookie，否则返回 403
+- **下载请求不携带 Cookie**：CDN URL（v*-web*.douyinvod.com）不需要 Cookie 鉴权，仅靠 URL 临时令牌；大 Cookie（>10KB）会触发 Nginx `400 Request Header Or Cookie Too Large`。仅携带 Referer + 完整 User-Agent
+- 注意：`fetch_user_items` / `fetch_single_item` API 调用仍需要 Cookie（API 域名需要鉴权，CDN 域名不需要）
 - 视频下载带 3 次重试（网络中断/超时），指数退避 2s→4s→6s
 - 失败时清理不完整文件
+
+### 单视频链接下载流程
+
+除了"用户主页 → 批量下载"模式，还支持单视频链接下载：
+
+```
+单视频 URL → utils.detect_single_video(url) → (platform, video_id)
+              ↓
+              engine.fetch_single_item(video_id) → DownloadItem
+              ↓
+              engine.download_user(url, items=[item])  # 复用按 nickname 创建目录 + 跳过已存在
+```
+
+抖音 URL 识别支持 4 种格式：
+- `https://www.douyin.com/user/{sec_uid}?modal_id={aweme_id}` — 用户主页弹窗
+- `https://www.douyin.com/video/{aweme_id}` — 视频直链
+- `https://www.douyin.com/note/{aweme_id}` — 图集笔记
+- `https://www.iesdouyin.com/share/video/{aweme_id}` — 分享链接
+
+`fetch_single_item` 调用 f2 的 `DouyinHandler.fetch_one_video(aweme_id)` 返回 `PostDetailFilter`，与 `fetch_user_items` 共享字段提取逻辑（aweme_type 判断图集/视频、bit_rate 空时回退到 play_addr）。
 
 ### 快手
 - GraphQL API 需要 `web_st` Cookie（session cookie，浏览器导出不包含）
