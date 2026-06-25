@@ -1,17 +1,41 @@
 """
 ShortVideoDownload - 小红书下载引擎
-使用 Playwright 真实浏览器环境获取数据（绕过反爬虫检测）
+使用 Playwright 真实浏览器环境，拦截浏览器自身的 API 响应获取数据
 aiohttp 直接下载视频/图片
+
+反爬规避策略（基于全网调研 + 实测验证）:
+1. 不手动调用 API（签名格式 XYW_ 不被接受，浏览器用 XYS_）
+2. 让浏览器自己发请求（滚动触发），拦截响应 → 合法请求
+3. 滚动间隔 5-10 秒随机 → 模拟人类浏览
+4. 详情页访问间隔 10-15 秒 → 模拟人类阅读
+5. 单次下载上限 20 个 → 控制使用强度
+6. 检测到 461/captcha 立即停止 → 保护账号
+
+注意：window._webmsxyw 返回的 XYW_ 签名格式已被 API 拒绝（406），
+      必须让浏览器自己发请求（XYS_ 格式）然后拦截响应。
 """
 import os
 import re
 import json
+import random
 import asyncio
 from typing import List, Optional
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig
 
+
+# 安全配置（基于全网调研的最佳实践）
+# 单次下载超过 20 个会显著增加被检测风险
+MAX_DOWNLOAD_PER_SESSION = 20
+# 滚动间隔（秒）- 模拟人类浏览速度
+MIN_SCROLL_DELAY = 5.0
+MAX_SCROLL_DELAY = 10.0
+# 详情页访问间隔（秒）- 模拟人类阅读时间
+MIN_DETAIL_DELAY = 10.0
+MAX_DETAIL_DELAY = 15.0
+# 最大滚动次数（每次获取约 30 个笔记）
+MAX_SCROLL_COUNT = 5
 
 STEALTH_JS = '''
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -24,7 +48,7 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 
 class XiaohongshuEngine(BaseEngine):
-    """小红书下载引擎 - Playwright 获取数据 + aiohttp 直接下载"""
+    """小红书下载引擎 - 拦截浏览器 API 响应 + aiohttp 直接下载"""
 
     platform = "xiaohongshu"
 
@@ -98,11 +122,15 @@ class XiaohongshuEngine(BaseEngine):
         await context.add_cookies(self._parse_cookies())
         return context
 
+    @staticmethod
+    def _random_delay(min_d: float, max_d: float) -> float:
+        """随机延时（模拟人类行为）"""
+        return random.uniform(min_d, max_d)
+
     async def fetch_user_items(self, user_url: str) -> List[DownloadItem]:
         """
         获取小红书用户的所有笔记列表
-        使用 Playwright 访问用户主页，从 Pinia store 获取笔记列表
-        滚动加载所有笔记，然后逐个获取详情
+        通过拦截浏览器自身的 API 响应获取数据（不手动调用 API）
         """
         if not self._cookie:
             raise RuntimeError(
@@ -112,6 +140,13 @@ class XiaohongshuEngine(BaseEngine):
                 "  2. --browser-cookie firefox\n"
                 "  3. 导出 cookies.txt 文件放到项目根目录"
             )
+
+        # 单次下载上限保护
+        effective_max = self.config.max_count
+        if effective_max == 0 or effective_max > MAX_DOWNLOAD_PER_SESSION:
+            if effective_max > MAX_DOWNLOAD_PER_SESSION:
+                self._log(f"  ⚠ 单次下载超过 {MAX_DOWNLOAD_PER_SESSION} 会触发风控，已自动限制")
+            effective_max = MAX_DOWNLOAD_PER_SESSION
 
         user_id = self._extract_user_id(user_url)
 
@@ -128,8 +163,8 @@ class XiaohongshuEngine(BaseEngine):
         page = await context.new_page()
 
         try:
-            # 访问用户主页
-            self._log(f"  访问用户主页: {profile_url}")
+            # 访问用户主页（仅一次，建立浏览器环境）
+            self._log(f"  访问用户主页建立会话...")
             try:
                 await page.goto(profile_url, wait_until='domcontentloaded', timeout=20000)
             except Exception as e:
@@ -160,36 +195,42 @@ class XiaohongshuEngine(BaseEngine):
             nickname = login_info.get('nickname', '')
             self._log(f"  已登录: {nickname}")
 
-            # 滚动加载所有笔记
-            notes = await self._scroll_and_collect_notes(page)
+            # 获取笔记列表（拦截浏览器自身的 API 响应）
+            notes = await self._scroll_and_intercept_notes(page, effective_max)
             self._log(f"  共获取 {len(notes)} 个笔记")
 
             if not notes:
                 self._log("  未获取到任何笔记")
                 return []
 
-            # 在获取详情前应用 max_count 限制（避免不必要地获取所有详情）
-            if self.config.max_count > 0:
-                notes = notes[:self.config.max_count]
-                self._log(f"  限制下载前 {len(notes)} 个")
-
-            # 逐个获取笔记详情
+            # 逐个获取笔记详情（通过访问详情页，拦截 feed API 响应）
             items = []
             total = len(notes)
             for idx, note_info in enumerate(notes, 1):
-                note_id = note_info.get('noteId') or note_info.get('id', '')
+                note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
                 if not note_id:
                     continue
 
-                self._log(f"  [{idx}/{total}] 获取详情: {note_info.get('title', '')[:40]}")
-                item = await self._fetch_note_detail(page, note_info, nickname)
-                if item:
-                    items.append(item)
-                else:
-                    self._log(f"  [{idx}/{total}] 跳过: 无法获取详情")
+                self._log(f"  [{idx}/{total}] 获取详情: {note_info.get('display_title', '')[:40]}")
 
-                # 请求间隔，避免触发反爬
-                await asyncio.sleep(0.5)
+                try:
+                    item = await self._fetch_note_detail_via_page(page, note_info, nickname)
+                    if item:
+                        items.append(item)
+                    else:
+                        self._log(f"  [{idx}/{total}] 跳过: 无法获取详情")
+                except RuntimeError as e:
+                    # 检测到风控，立即停止
+                    if 'captcha' in str(e).lower() or 'blocked' in str(e).lower() or '461' in str(e):
+                        self._log(f"  ⚠ 检测到风控限制，停止获取以保护账号: {e}")
+                        break
+                    raise
+
+                # 随机延时（10-15 秒，模拟人类阅读）
+                if idx < total:
+                    delay = self._random_delay(MIN_DETAIL_DELAY, MAX_DETAIL_DELAY)
+                    self._log(f"  等待 {delay:.1f}s（模拟阅读）...")
+                    await asyncio.sleep(delay)
 
             return items
 
@@ -197,63 +238,95 @@ class XiaohongshuEngine(BaseEngine):
             await context.close()
             await self._close_browser()
 
-    async def _scroll_and_collect_notes(self, page) -> list:
-        """滚动页面加载所有笔记，返回笔记列表"""
+    async def _scroll_and_intercept_notes(self, page, max_count: int) -> list:
+        """缓慢滚动页面，拦截浏览器自身的 user_posted API 响应"""
         notes = []
-        last_count = 0
-        no_change_count = 0
+        seen_ids = set()
 
-        for scroll_idx in range(30):  # 最多滚动 30 次
-            current_notes = await page.evaluate('''() => {
-                try {
-                    const app = document.querySelector('#app').__vue_app__;
-                    const pinia = app.config.globalProperties.$pinia;
-                    const userStore = pinia._s.get('user');
-                    const notes = userStore?.notes?.[0] || [];
-                    return notes.map(n => ({
-                        id: n.id,
-                        noteId: n.noteCard?.noteId || n.id,
-                        xsecToken: n.xsecToken || n.noteCard?.xsecToken || '',
-                        type: n.noteCard?.type || '',
-                        title: n.noteCard?.displayTitle || '',
-                    }));
-                } catch(e) {
-                    return [];
-                }
-            }''')
+        # 设置响应拦截器
+        captured_data = {'notes': [], 'stop': False}
 
-            if current_notes and len(current_notes) > len(notes):
-                notes = current_notes
-                no_change_count = 0
-            else:
-                no_change_count += 1
+        async def on_response(response):
+            if captured_data['stop']:
+                return
+            if '/api/sns/web/v1/user_posted' in response.url:
+                if response.status == 461:
+                    captured_data['stop'] = True
+                    return
+                if response.status == 200:
+                    try:
+                        json_data = await response.json()
+                        if json_data.get('success'):
+                            new_notes = json_data.get('data', {}).get('notes', [])
+                            for n in new_notes:
+                                nid = n.get('note_id', '')
+                                if nid and nid not in seen_ids:
+                                    seen_ids.add(nid)
+                                    captured_data['notes'].append(n)
+                    except Exception:
+                        pass
 
-            # 连续 3 次没有新笔记，认为已加载完
-            if no_change_count >= 3:
-                break
+        page.on('response', on_response)
 
-            # 滚动到底部
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-            await page.wait_for_timeout(2000)
+        try:
+            # 首次加载会自动触发一次 user_posted 请求
+            self._log(f"  等待首屏笔记加载...")
+            await page.wait_for_timeout(3000)
 
-        return notes
+            # 如果首屏没有数据，尝试滚动一次
+            if not captured_data['notes']:
+                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await page.wait_for_timeout(3000)
 
-    async def _fetch_note_detail(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
-        """获取单个笔记的详情（含视频/图片URL）"""
-        note_id = note_info.get('noteId') or note_info.get('id', '')
-        xsec_token = note_info.get('xsecToken', '')
+            # 收集首屏数据
+            notes = list(captured_data['notes'])
+            self._log(f"  首屏: {len(notes)} 个笔记")
+
+            # 继续滚动加载更多（缓慢，模拟人类）
+            scroll_count = 0
+            while len(notes) < max_count and scroll_count < MAX_SCROLL_COUNT and not captured_data['stop']:
+                scroll_count += 1
+                delay = self._random_delay(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY)
+                self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s...")
+                await asyncio.sleep(delay)
+
+                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await page.wait_for_timeout(3000)
+
+                # 更新笔记列表
+                notes = list(captured_data['notes'])
+                self._log(f"  累计: {len(notes)} 个笔记")
+
+                # 检测风控
+                if captured_data['stop']:
+                    self._log(f"  ⚠ 检测到风控（461），停止滚动")
+                    break
+
+            return notes[:max_count]
+
+        finally:
+            page.remove_listener('response', on_response)
+
+    async def _fetch_note_detail_via_page(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
+        """
+        访问笔记详情页，从 Pinia store 读取详情数据
+        详情通过 SSR 渲染，不调用 feed API（已验证）
+        """
+        note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
+        xsec_token = note_info.get('xsec_token', '')
 
         note_url = f'https://www.xiaohongshu.com/explore/{note_id}'
         if xsec_token:
             note_url += f'?xsec_token={xsec_token}&xsec_source=pc_note'
 
+        # 访问详情页（浏览器会通过 SSR 加载数据到 Pinia store）
         try:
             await page.goto(note_url, wait_until='domcontentloaded', timeout=15000)
         except Exception:
             pass
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2000)
 
-        # 从 Pinia store 获取笔记详情
+        # 从 Pinia store 读取详情数据（camelCase 格式）
         detail = await page.evaluate('''(noteId) => {
             try {
                 const app = document.querySelector('#app').__vue_app__;
@@ -342,7 +415,7 @@ class XiaohongshuEngine(BaseEngine):
             cover_url = 'https://' + cover_url[7:]
 
         # 标题：优先用详情页的 title，其次用列表的 displayTitle
-        title = detail.get('title', '') or note_info.get('title', '') or f'note_{note_id}'
+        title = detail.get('title', '') or note_info.get('display_title', '') or f'note_{note_id}'
         desc = detail.get('desc', '') or title
         note_nickname = detail.get('nickname', '') or nickname
 
