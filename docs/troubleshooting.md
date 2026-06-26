@@ -86,6 +86,18 @@
 1. 确认 cookies.txt 中有 `xiaohongshu.com` 的 Cookie
 2. 确认用户主页 URL 有效
 3. 确认 `on_response` 拦截器在 `page.goto()` 之前注册（通过 `captured_data` 共享状态）
+---
+
+### 小红书批量下载只能获取时间最早的几个文件
+
+**现象**：能登录、能拿到笔记，但只下载到时间最早的几个/十几个文件，最新笔记全部缺失
+
+**根因**：`user_posted` API 的 cursor 机制会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记。如果只依赖 API 拦截器，拿到的就是时间最早的几个文件，而不是最新的笔记。
+
+**解决**（已在 2026-06-26 修复）：以 SSR `__INITIAL_STATE__.user.notes._rawValue[0]` 作为主数据源（含完整 `xsecToken`），user_posted API 拦截器只作为补充（获取 SSR 之外的更多笔记）。详见 `engines/xiaohongshu.py` 的 `_scroll_and_intercept_notes` 方法。
+
+**字段命名陷阱**：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），两者不能混用，`_fetch_note_detail_via_page` 已兼容两种命名。
+
 
 ---
 

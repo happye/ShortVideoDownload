@@ -50,9 +50,11 @@
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
 - 必须用 Playwright 真实浏览器环境获取数据（stealth 模式 + cookie 注入）
 - 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
-  - 笔记列表：拦截浏览器自身的 `user_posted` API 响应（`/api/sns/web/v1/user_posted`）
+  - 笔记列表：**SSR `__INITIAL_STATE__.user.notes._rawValue[0]` 为主**（含完整 xsecToken），user_posted API 拦截为辅（补充 SSR 之外的更多笔记）
   - 笔记详情：`noteStore.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
-- **响应拦截器必须在 `page.goto()` 之前注册**：首次 `user_posted` API 在 goto 期间就发出，拦截器在 goto 之后才注册会错过首次响应，导致首屏 0 个笔记（滚动不会重新触发请求）
+- **不能依赖 user_posted API 拿首屏**：API 的 cursor 会跳过前 30 个，只返回 4 个 `has_more=False` 的更早笔记，必须从 SSR 提取
+- **字段命名陷阱**：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
+- **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
 - 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
 - `max_count` 在获取详情前应用，避免不必要地获取所有详情

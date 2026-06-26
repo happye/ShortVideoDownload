@@ -23,6 +23,16 @@
     - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
   - 验证: 6 种 URL 格式识别全部正确（含 modal_id、/video/、/note/、iesdouyin、无 modal_id 的用户主页应返回 None）；视频 7539162803471846698 实际下载到 `output\douyin\刘小菲\` 目录（1.7MB + 封面），作者按 URL 中 sec_uid 解析得到，与文件名中 item_id 后缀一致
 
+### 2026-06-26 小红书批量下载 SSR 数据源修复
+
+- 问题 #31: 小红书批量下载只能获取时间最早的几个文件 → 已修复
+  - 现象：能登录、能拿到笔记，但只下载到时间最早的几个/十几个文件，最新笔记全部缺失
+  - 根因：`user_posted` API 的 cursor 机制会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记。如果只依赖 API 拦截器，拿到的就是时间最早的几个文件
+  - 调试发现：`__INITIAL_STATE__.user.notes._rawValue[0]` 含全部 34 个 SSR 笔记，每个都有 `id` + `xsecToken`（驼峰命名，非下划线），是首屏可靠数据源
+  - 修复方案：`_scroll_and_intercept_notes` 改为以 SSR 数据为主（含完整 xsecToken），user_posted API 拦截器只作为补充（获取 SSR 之外的更多笔记）
+  - 字段命名兼容：`_fetch_note_detail_via_page` 同时支持 `xsec_token`（下划线，API 响应）和 `xsecToken`（驼峰，SSR）
+  - 验证：测试用户 57f8e0b282ec397600202ae1，从 SSR 拿到 34 个笔记（修复前只拿到 4 个），20 个详情全部成功获取（标题从最新的"三年级小学生在家穿搭"开始，不再是时间最早的几个）
+
 ### 2026-06-25 小红书单视频下载 + 拦截器修复
 
 - 问题 #29: 小红书 fetch_user_items 拿不到任何笔记（严重 bug）→ 已修复

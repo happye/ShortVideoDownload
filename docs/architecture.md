@@ -158,6 +158,13 @@ output/
 
 `fetch_single_item` 调用 f2 的 `DouyinHandler.fetch_one_video(aweme_id)` 返回 `PostDetailFilter`，与 `fetch_user_items` 共享字段提取逻辑（aweme_type 判断图集/视频、bit_rate 空时回退到 play_addr）。
 
+小红书 URL 识别支持 3 种格式：
+- `https://www.xiaohongshu.com/explore/{note_id}` — 标准（可带 `?xsec_token=`）
+- `https://www.xiaohongshu.com/discovery/item/{note_id}` — 旧格式
+- `https://www.xiaohongshu.com/note/{note_id}` — 笔记直链
+
+小红书 `fetch_single_item(note_id, original_url)` 从 `original_url` 提取 `xsec_token`，用 Playwright 访问详情页，复用 `_fetch_note_detail_via_page` 从 Pinia store 读取详情。
+
 ### 快手
 - GraphQL API 需要 `web_st` Cookie（session cookie，浏览器导出不包含）
 - `webday7_st`（7天免登录）不够，API 返回 "No Login"
@@ -165,9 +172,11 @@ output/
 ### 小红书
 - Playwright 真实浏览器环境（stealth 模式 + cookie 注入），aiohttp 直接请求会被识别为未登录
 - 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
-  - 笔记列表：拦截浏览器自身的 `user_posted` API 响应（`/api/sns/web/v1/user_posted`）
+  - **笔记列表**：以 SSR `__INITIAL_STATE__.user.notes._rawValue[0]` 为主（含完整 `xsecToken`），user_posted API 拦截为辅
+    - 不能依赖 user_posted API 拿首屏：API 的 cursor 会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记，导致只能下载时间最早的几个文件
+    - 字段命名：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
   - 笔记详情：从 `noteStore.noteDetailMap[note_id].note` 读取
-- **响应拦截器必须在 `page.goto()` 之前注册**：首次 `user_posted` API 在 goto 期间就发出，如果拦截器在 goto 之后才注册，会错过首次响应，导致首屏 0 个笔记（滚动不会重新触发请求）
+- **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
 - 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
 - 详情页访问间隔 10-15 秒，单次上限 20 个（避免触发风控）

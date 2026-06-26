@@ -325,53 +325,88 @@ class XiaohongshuEngine(BaseEngine):
             await self._close_browser()
 
     async def _scroll_and_intercept_notes(self, page, max_count: int, captured_data: dict) -> list:
-        """缓慢滚动页面，拦截浏览器自身的 user_posted API 响应
+        """获取笔记列表：SSR 数据为主，API 拦截为辅，滚动补充更多
 
-        注意：拦截器（on_response）由调用方在 page.goto() 之前注册，
-        并通过 captured_data 共享状态。本方法只负责滚动和收集。
+        数据源优先级：
+        1. __INITIAL_STATE__.user.notes._rawValue[0] — SSR 渲染的笔记（含完整 xsecToken）
+           ※ user_posted API 的 cursor 会跳过前 30 个，只返回更早的 4 个，has_more=False，
+              无法靠 API 拿到全部笔记。SSR 是唯一可靠的首屏数据源。
+        2. user_posted API 拦截器捕获的笔记（SSR 之外的更多笔记，需滚动触发）
+
+        字段命名：SSR 中是 xsecToken（驼峰），API 响应中是 xsec_token（下划线），
+        此处统一保留原字段名，_fetch_note_detail_via_page 会兼容两种命名。
         """
         notes = []
+        seen_ids = set()
 
-        try:
-            # 首次加载会自动触发一次 user_posted 请求
-            # 拦截器已在调用方 goto 前注册，此处直接收集首屏数据
-            self._log(f"  等待首屏笔记加载...")
+        def _add(n):
+            nid = n.get('note_id') or n.get('id', '')
+            if nid and nid not in seen_ids:
+                seen_ids.add(nid)
+                notes.append(n)
+
+        # 1. 从 __INITIAL_STATE__ 提取 SSR 笔记（主要数据源）
+        self._log(f"  从 __INITIAL_STATE__ 提取 SSR 笔记...")
+        await page.wait_for_timeout(2000)
+        ssr_notes = await page.evaluate('''() => {
+            try {
+                const state = window.__INITIAL_STATE__;
+                const tabs = state.user.notes._rawValue;
+                for (let i = 0; i < tabs.length; i++) {
+                    const tab = tabs[i];
+                    if (Array.isArray(tab) && tab.length > 0) {
+                        return tab.map(n => ({
+                            note_id: n.id,
+                            id: n.id,
+                            xsecToken: n.xsecToken || '',
+                            display_title: n.noteCard ? n.noteCard.displayTitle : '',
+                            type: n.noteCard ? n.noteCard.type : '',
+                        }));
+                    }
+                }
+                return [];
+            } catch(e) {
+                return [];
+            }
+        }''')
+        for n in ssr_notes:
+            _add(n)
+        self._log(f"  SSR 笔记: {len(notes)} 个")
+
+        # 2. 合并 API 拦截器已捕获的笔记（goto 期间就发出的首次响应）
+        api_count_before = len(notes)
+        for n in captured_data['notes']:
+            _add(n)
+        if len(notes) > api_count_before:
+            self._log(f"  合并 API 拦截新增 {len(notes) - api_count_before} 个")
+
+        # 3. 继续滚动加载更多（缓慢，模拟人类），合并新捕获的 API 笔记
+        scroll_count = 0
+        while len(notes) < max_count and scroll_count < MAX_SCROLL_COUNT and not captured_data['stop']:
+            scroll_count += 1
+            delay = self._random_delay(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY)
+            self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s...")
+            await asyncio.sleep(delay)
+
+            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
             await page.wait_for_timeout(3000)
 
-            # 如果首屏没有数据，尝试滚动一次
-            if not captured_data['notes']:
-                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                await page.wait_for_timeout(3000)
+            # 合并新捕获的 API 笔记
+            before = len(notes)
+            for n in captured_data['notes']:
+                _add(n)
+            self._log(f"  累计: {len(notes)} 个笔记" + (f" (+{len(notes)-before})" if len(notes) > before else ""))
 
-            # 收集首屏数据
-            notes = list(captured_data['notes'])
-            self._log(f"  首屏: {len(notes)} 个笔记")
+            if captured_data['stop']:
+                self._log(f"  ⚠ 检测到风控（461），停止滚动")
+                break
 
-            # 继续滚动加载更多（缓慢，模拟人类）
-            scroll_count = 0
-            while len(notes) < max_count and scroll_count < MAX_SCROLL_COUNT and not captured_data['stop']:
-                scroll_count += 1
-                delay = self._random_delay(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY)
-                self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s...")
-                await asyncio.sleep(delay)
+            # 本轮无新增且已滚动多次 → 放弃
+            if len(notes) == before and scroll_count >= 2:
+                self._log(f"  本轮无新增，停止滚动")
+                break
 
-                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                await page.wait_for_timeout(3000)
-
-                # 更新笔记列表
-                notes = list(captured_data['notes'])
-                self._log(f"  累计: {len(notes)} 个笔记")
-
-                # 检测风控
-                if captured_data['stop']:
-                    self._log(f"  ⚠ 检测到风控（461），停止滚动")
-                    break
-
-            return notes[:max_count]
-
-        finally:
-            # 监听器由调用方负责移除
-            pass
+        return notes[:max_count]
 
     async def _fetch_note_detail_via_page(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
         """
@@ -379,7 +414,8 @@ class XiaohongshuEngine(BaseEngine):
         详情通过 SSR 渲染，不调用 feed API（已验证）
         """
         note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
-        xsec_token = note_info.get('xsec_token', '')
+        # 兼容两种命名：SSR 中是 xsecToken（驼峰），API 响应中是 xsec_token（下划线）
+        xsec_token = note_info.get('xsec_token') or note_info.get('xsecToken') or ''
 
         note_url = f'https://www.xiaohongshu.com/explore/{note_id}'
         if xsec_token:
