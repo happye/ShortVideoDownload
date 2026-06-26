@@ -162,6 +162,35 @@ class XiaohongshuEngine(BaseEngine):
         context = await self._new_context()
         page = await context.new_page()
 
+        # 在 goto 之前注册响应拦截器
+        # 原因：首次 user_posted API 在 page.goto() 期间就发出，
+        # 如果拦截器在 goto 之后才注册，会错过首次响应，导致首屏 0 个笔记。
+        # 滚动不会重新触发 user_posted（首次请求已返回数据，页面内部已渲染）。
+        captured_data = {'notes': [], 'stop': False}
+        seen_ids = set()
+
+        async def on_response(response):
+            if captured_data['stop']:
+                return
+            if '/api/sns/web/v1/user_posted' in response.url:
+                if response.status == 461:
+                    captured_data['stop'] = True
+                    return
+                if response.status == 200:
+                    try:
+                        json_data = await response.json()
+                        if json_data.get('success'):
+                            new_notes = json_data.get('data', {}).get('notes', [])
+                            for n in new_notes:
+                                nid = n.get('note_id', '')
+                                if nid and nid not in seen_ids:
+                                    seen_ids.add(nid)
+                                    captured_data['notes'].append(n)
+                    except Exception:
+                        pass
+
+        page.on('response', on_response)
+
         try:
             # 访问用户主页（仅一次，建立浏览器环境）
             self._log(f"  访问用户主页建立会话...")
@@ -195,8 +224,8 @@ class XiaohongshuEngine(BaseEngine):
             nickname = login_info.get('nickname', '')
             self._log(f"  已登录: {nickname}")
 
-            # 获取笔记列表（拦截浏览器自身的 API 响应）
-            notes = await self._scroll_and_intercept_notes(page, effective_max)
+            # 获取笔记列表（拦截器已在 goto 前注册，复用 captured_data）
+            notes = await self._scroll_and_intercept_notes(page, effective_max, captured_data)
             self._log(f"  共获取 {len(notes)} 个笔记")
 
             if not notes:
@@ -235,41 +264,77 @@ class XiaohongshuEngine(BaseEngine):
             return items
 
         finally:
+            page.remove_listener('response', on_response)
             await context.close()
             await self._close_browser()
 
-    async def _scroll_and_intercept_notes(self, page, max_count: int) -> list:
-        """缓慢滚动页面，拦截浏览器自身的 user_posted API 响应"""
+    async def fetch_single_item(self, note_id: str, original_url: str = None) -> Optional[DownloadItem]:
+        """
+        获取单个小红书笔记详情（用于单视频链接下载）
+        Args:
+            note_id: 小红书笔记 ID
+            original_url: 原始 URL（用于提取 xsec_token，访问详情页需要）
+        Returns:
+            DownloadItem 或 None（失败时）
+        """
+        if not self._cookie:
+            raise RuntimeError(
+                "小红书需要登录 Cookie 才能获取笔记详情。\n"
+                "请使用 --cookie 参数或 cookies.txt 文件提供 Cookie。"
+            )
+
+        # 从原始 URL 提取 xsec_token
+        xsec_token = ''
+        if original_url:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(original_url)
+            params = parse_qs(parsed.query)
+            if params.get('xsec_token'):
+                xsec_token = params['xsec_token'][0]
+
+        # 构造 note_info，复用 _fetch_note_detail_via_page
+        note_info = {
+            'note_id': note_id,
+            'noteId': note_id,
+            'id': note_id,
+            'xsec_token': xsec_token,
+            'display_title': '',
+        }
+
+        context = await self._new_context()
+        page = await context.new_page()
+
+        try:
+            # 先访问首页建立会话（避免直接访问详情页被识别为爬虫）
+            try:
+                await page.goto('https://www.xiaohongshu.com', wait_until='domcontentloaded', timeout=15000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(2000)
+
+            # 访问详情页并从 Pinia store 读取数据
+            # nickname 传空字符串，_fetch_note_detail_via_page 会从详情中提取作者昵称
+            item = await self._fetch_note_detail_via_page(page, note_info, '')
+
+            if not item:
+                self._log(f"  无法获取笔记 {note_id} 详情（可能 Cookie 失效或笔记已删除）")
+
+            return item
+        finally:
+            await context.close()
+            await self._close_browser()
+
+    async def _scroll_and_intercept_notes(self, page, max_count: int, captured_data: dict) -> list:
+        """缓慢滚动页面，拦截浏览器自身的 user_posted API 响应
+
+        注意：拦截器（on_response）由调用方在 page.goto() 之前注册，
+        并通过 captured_data 共享状态。本方法只负责滚动和收集。
+        """
         notes = []
-        seen_ids = set()
-
-        # 设置响应拦截器
-        captured_data = {'notes': [], 'stop': False}
-
-        async def on_response(response):
-            if captured_data['stop']:
-                return
-            if '/api/sns/web/v1/user_posted' in response.url:
-                if response.status == 461:
-                    captured_data['stop'] = True
-                    return
-                if response.status == 200:
-                    try:
-                        json_data = await response.json()
-                        if json_data.get('success'):
-                            new_notes = json_data.get('data', {}).get('notes', [])
-                            for n in new_notes:
-                                nid = n.get('note_id', '')
-                                if nid and nid not in seen_ids:
-                                    seen_ids.add(nid)
-                                    captured_data['notes'].append(n)
-                    except Exception:
-                        pass
-
-        page.on('response', on_response)
 
         try:
             # 首次加载会自动触发一次 user_posted 请求
+            # 拦截器已在调用方 goto 前注册，此处直接收集首屏数据
             self._log(f"  等待首屏笔记加载...")
             await page.wait_for_timeout(3000)
 
@@ -305,7 +370,8 @@ class XiaohongshuEngine(BaseEngine):
             return notes[:max_count]
 
         finally:
-            page.remove_listener('response', on_response)
+            # 监听器由调用方负责移除
+            pass
 
     async def _fetch_note_detail_via_page(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
         """

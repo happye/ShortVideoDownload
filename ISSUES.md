@@ -23,6 +23,24 @@
     - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
   - 验证: 6 种 URL 格式识别全部正确（含 modal_id、/video/、/note/、iesdouyin、无 modal_id 的用户主页应返回 None）；视频 7539162803471846698 实际下载到 `output\douyin\刘小菲\` 目录（1.7MB + 封面），作者按 URL 中 sec_uid 解析得到，与文件名中 item_id 后缀一致
 
+### 2026-06-25 小红书单视频下载 + 拦截器修复
+
+- 问题 #29: 小红书 fetch_user_items 拿不到任何笔记（严重 bug）→ 已修复
+  - 现象: 已登录成功，但"首屏: 0 个笔记"，滚动 5 次全是 0，最终"未获取到任何笔记"
+  - 根因: `on_response` 拦截器在 `_scroll_and_intercept_notes` 内部注册，但首次 `user_posted` API 在 `page.goto()` 期间就发出。**拦截器注册太晚，错过首次响应**。而滚动不会重新触发 user_posted 请求（首次请求已返回数据，页面内部已渲染）
+  - 调试: 用抓包脚本确认 user_posted API 在首屏就成功返回 4509 字节数据（`data.notes` + `has_more`，`success: True`），但正式引擎的拦截器没注册，错过了
+  - 修复: 把 `on_response` 拦截器注册移到 `page.goto()` 之前，通过 `captured_data` 共享状态传给 `_scroll_and_intercept_notes`
+  - 验证: 修复前"首屏 0 个笔记"，修复后"首屏 4 个笔记"，成功获取 3 个笔记详情
+
+- 问题 #30: 小红书单视频链接下载 → 已实现
+  - 需求: 小红书也支持单视频链接下载（与抖音 #28 一致）
+  - 实现:
+    - `utils.detect_single_video(url)` 加小红书 3 种 URL 格式（`/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`）
+    - `engines/xiaohongshu.py` 新增 `fetch_single_item(note_id, original_url)`，从 URL 提取 `xsec_token`，用 Playwright 访问详情页，复用 `_fetch_note_detail_via_page`
+    - `engines/douyin.py` 的 `fetch_single_item` 签名加 `original_url=None`（兼容）
+    - `svd.py` 调用改为 `engine.fetch_single_item(video_id, original_url=url)`
+  - 验证: 8 种 URL 识别测试全过（小红书 3 种 + 用户主页排除 + 抖音兼容）
+
 ### 2026-06-25 小红书反爬规避
 
 - 问题 #26: 小红书批量下载触发官方警告 → 已修复（全面重构规避策略）

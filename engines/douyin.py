@@ -197,11 +197,12 @@ class DouyinEngine(BaseEngine):
 
         return items
 
-    async def fetch_single_item(self, video_id: str) -> Optional[DownloadItem]:
+    async def fetch_single_item(self, video_id: str, original_url: str = None) -> Optional[DownloadItem]:
         """
         获取单个抖音作品详情（用于单视频链接下载）
         Args:
             video_id: aweme_id（抖音视频 ID）
+            original_url: 原始 URL（抖音不需要，小红书等平台用于提取 token）
         Returns:
             DownloadItem 或 None（失败时）
         """

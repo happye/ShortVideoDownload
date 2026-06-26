@@ -37,8 +37,8 @@
 - 注意：`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie（API 域名需要鉴权，CDN 域名不需要）
 
 ### 单视频链接下载
-- `utils.detect_single_video(url)` 识别 4 种抖音 URL 格式：`?modal_id=`、`/video/{id}`、`/note/{id}`、`iesdouyin.com/share/video/{id}`
-- 引擎实现 `fetch_single_item(video_id)`：调用 f2 的 `fetch_one_video(aweme_id)` 返回单个 DownloadItem
+- `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 URL 格式（`/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`）
+- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`，小红书用 Playwright 访问详情页（从 `original_url` 提取 `xsec_token`）
 - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
 
 ### 抖音视频URL回退
@@ -50,10 +50,11 @@
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
 - 必须用 Playwright 真实浏览器环境获取数据（stealth 模式 + cookie 注入）
 - 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
-  - 笔记列表：`userStore.notes[0]`，每条含 `id`/`noteCard.noteId`/`xsecToken`
+  - 笔记列表：拦截浏览器自身的 `user_posted` API 响应（`/api/sns/web/v1/user_posted`）
   - 笔记详情：`noteStore.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
+- **响应拦截器必须在 `page.goto()` 之前注册**：首次 `user_posted` API 在 goto 期间就发出，拦截器在 goto 之后才注册会错过首次响应，导致首屏 0 个笔记（滚动不会重新触发请求）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
-- 翻页：滚动页面到底部，Pinia store 自动追加笔记（最多 30 次滚动）
+- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
 - `max_count` 在获取详情前应用，避免不必要地获取所有详情
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
 

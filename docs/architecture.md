@@ -163,9 +163,15 @@ output/
 - `webday7_st`（7天免登录）不够，API 返回 "No Login"
 
 ### 小红书
-- HTML 解析方式，从 `__INITIAL_STATE__` JSON 提取笔记列表
-- 只获取首屏数据（约20条），不支持翻页
-- 未登录时 302 重定向到登录页
+- Playwright 真实浏览器环境（stealth 模式 + cookie 注入），aiohttp 直接请求会被识别为未登录
+- 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
+  - 笔记列表：拦截浏览器自身的 `user_posted` API 响应（`/api/sns/web/v1/user_posted`）
+  - 笔记详情：从 `noteStore.noteDetailMap[note_id].note` 读取
+- **响应拦截器必须在 `page.goto()` 之前注册**：首次 `user_posted` API 在 goto 期间就发出，如果拦截器在 goto 之后才注册，会错过首次响应，导致首屏 0 个笔记（滚动不会重新触发请求）
+- 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
+- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
+- 详情页访问间隔 10-15 秒，单次上限 20 个（避免触发风控）
+- 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
 
 ### B站
 - 使用旧 API `x/space/arc/search`（不需要 wbi 签名）

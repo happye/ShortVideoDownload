@@ -5,7 +5,7 @@
 ## 功能特性
 
 - 按用户下载：输入用户主页链接，批量下载该用户所有视频和图片
-- 单视频下载：直接给单视频链接（支持抖音 `/video/{id}`、`?modal_id=`、`/note/{id}`、`iesdouyin.com/share/video/{id}`），自动识别作者并归档到对应用户名目录
+- 单视频下载：直接给单视频链接（抖音 `/video/{id}`、`?modal_id=`、`/note/{id}`、`iesdouyin.com/share/video/{id}`；小红书 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`），自动识别作者并归档到对应用户名目录
 - 高清/超清：自动选择最高画质，支持 4K/1080P
 - 自动归档：以用户名创建文件夹，原视频名命名文件
 - 智能去重：基于 item_id 判断，已下载视频自动跳过，不会重复下载
@@ -82,6 +82,10 @@ python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..." --browser-cookie fir
 ```bash
 # 下载抖音用户所有作品（从Firefox提取Cookie）
 python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..." --browser-cookie firefox
+
+# 下载抖音单个视频（自动识别作者，归档到对应用户名目录）
+python svd.py "https://www.douyin.com/video/7539162803471846698"
+python svd.py "https://www.douyin.com/user/MS4wLjAB...?modal_id=7539162803471846698"
 
 # 下载B站用户视频
 python svd.py "https://space.bilibili.com/123456" --browser-cookie firefox

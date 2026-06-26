@@ -132,6 +132,13 @@ def detect_single_video(url: str) -> tuple:
       - https://www.douyin.com/video/{aweme_id}
       - https://www.douyin.com/note/{aweme_id}    (图集笔记)
       - https://www.iesdouyin.com/share/video/{aweme_id}
+
+    支持的小红书格式:
+      - https://www.xiaohongshu.com/explore/{note_id}    (标准，可带 ?xsec_token=)
+      - https://www.xiaohongshu.com/discovery/item/{note_id}  (旧格式)
+      - https://www.xiaohongshu.com/note/{note_id}       (笔记直链)
+
+    注意: 小红书访问详情页需要 xsec_token，由 fetch_single_item 从原始 URL 提取。
     """
     from urllib.parse import urlparse, parse_qs
 
@@ -154,6 +161,19 @@ def detect_single_video(url: str) -> tuple:
         m = re.search(r'iesdouyin\.com/share/video/(\d+)', url)
         if m:
             return ("douyin", m.group(1))
+    elif platform == "xiaohongshu":
+        # 1. /explore/{note_id} （标准格式，可带 xsec_token 参数）
+        m = re.search(r'/explore/([A-Za-z0-9]{8,})', url)
+        if m:
+            return ("xiaohongshu", m.group(1))
+        # 2. /discovery/item/{note_id} （旧格式）
+        m = re.search(r'/discovery/item/([A-Za-z0-9]{8,})', url)
+        if m:
+            return ("xiaohongshu", m.group(1))
+        # 3. /note/{note_id} （笔记直链）
+        m = re.search(r'/note/([A-Za-z0-9]{8,})', url)
+        if m:
+            return ("xiaohongshu", m.group(1))
     return (None, None)
 
 

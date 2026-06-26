@@ -422,7 +422,7 @@ async def run_download(url: str, config: DownloadConfig, mode: str, dry_run: boo
             print("正在获取作品列表...")
 
     if is_single:
-        item = await engine.fetch_single_item(video_id)
+        item = await engine.fetch_single_item(video_id, original_url=url)
         items = [item] if item else []
     else:
         items = await engine.fetch_user_items(url)
