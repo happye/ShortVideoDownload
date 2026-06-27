@@ -18,6 +18,7 @@
 - 不要在 `download_item()` 中保存 `.txt` 描述文件（`save_desc` 默认 False）
 - 不要移除 f2 的 logging handler（会导致 f2 内部重新添加），改为设置 CRITICAL 级别
 - 不要在 CLAUDE.md 里写历史叙事或变更日志
+- **不要用 Edit/Write 工具修改 `run.bat`**：它是 GBK 编码，Edit/Write 会用 UTF-8 读写导致"锟斤拷"乱码。`run.bat` 已设为只读 + `.gitattributes` 标记 `binary` 双重保护。如需修改，必须用 Python 脚本以 GBK 编码读写，并先 `Set-ItemProperty run.bat -Name IsReadOnly -Value $false` 取消只读
 
 ### f2 库处理
 - f2 的日志有两个来源：logging 系统 + `rich_console.print()` 直接输出

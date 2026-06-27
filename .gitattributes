@@ -1,0 +1,18 @@
+# Auto-detect text files (default)
+* text=auto
+
+# Binary files - never touch encoding/line-endings
+*.bat binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.7z binary
+
+# run.bat is GBK-encoded - must NEVER be touched by text tools
+# Marking as binary prevents git from doing any text conversion
+run.bat binary
