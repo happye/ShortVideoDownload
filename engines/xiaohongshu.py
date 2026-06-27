@@ -34,8 +34,8 @@ MAX_SCROLL_DELAY = 10.0
 # 详情页访问间隔（秒）- 模拟人类阅读时间
 MIN_DETAIL_DELAY = 10.0
 MAX_DETAIL_DELAY = 15.0
-# 最大滚动次数（每次获取约 30 个笔记）
-MAX_SCROLL_COUNT = 5
+# 最大滚动次数（安全上限，防无限循环；正常情况靠"连续无新增"自然停止）
+MAX_SCROLL_COUNT = 100
 
 STEALTH_JS = '''
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -384,7 +384,9 @@ class XiaohongshuEngine(BaseEngine):
             self._log(f"  合并 API 拦截新增 {len(notes) - api_count_before} 个")
 
         # 3. 继续滚动加载更多（缓慢，模拟人类），合并新捕获的 API 笔记
+        # 停止条件：达到 max_count / 检测到风控(461) / 连续 2 次无新增（已到底）
         scroll_count = 0
+        consecutive_empty = 0  # 连续无新增次数
         while len(notes) < max_count and scroll_count < MAX_SCROLL_COUNT and not captured_data['stop']:
             scroll_count += 1
             delay = self._random_delay(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY)
@@ -398,16 +400,21 @@ class XiaohongshuEngine(BaseEngine):
             before = len(notes)
             for n in captured_data['notes']:
                 _add(n)
-            self._log(f"  累计: {len(notes)} 个笔记" + (f" (+{len(notes)-before})" if len(notes) > before else ""))
+            new_count = len(notes) - before
+            self._log(f"  累计: {len(notes)} 个笔记" + (f" (+{new_count})" if new_count > 0 else ""))
 
             if captured_data['stop']:
                 self._log(f"  ⚠ 检测到风控（461），停止滚动")
                 break
 
-            # 本轮无新增且已滚动多次 → 放弃
-            if len(notes) == before and scroll_count >= 2:
-                self._log(f"  本轮无新增，停止滚动")
-                break
+            # 连续 2 次无新增 → 已到底，停止
+            if new_count == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= 2:
+                    self._log(f"  连续 2 次无新增，已到底部，停止滚动")
+                    break
+            else:
+                consecutive_empty = 0
 
         return notes[:max_count]
 
