@@ -26,8 +26,8 @@ from config import DownloadConfig
 
 
 # 安全配置（基于全网调研的最佳实践）
-# 单次下载超过 20 个会显著增加被检测风险
-MAX_DOWNLOAD_PER_SESSION = 20
+# 单次默认上限：100 个（详情页间隔 10-15s，约 17-25 分钟，平衡风控与需求）
+MAX_DOWNLOAD_PER_SESSION = 100
 # 滚动间隔（秒）- 模拟人类浏览速度
 MIN_SCROLL_DELAY = 5.0
 MAX_SCROLL_DELAY = 10.0
@@ -142,11 +142,14 @@ class XiaohongshuEngine(BaseEngine):
             )
 
         # 单次下载上限保护
+        # -n 0（不限）→ 用默认上限 100
+        # -n N → 尊重用户选择，超过 100 给风控警告但不强制限制
         effective_max = self.config.max_count
-        if effective_max == 0 or effective_max > MAX_DOWNLOAD_PER_SESSION:
-            if effective_max > MAX_DOWNLOAD_PER_SESSION:
-                self._log(f"  ⚠ 单次下载超过 {MAX_DOWNLOAD_PER_SESSION} 会触发风控，已自动限制")
+        if effective_max == 0:
             effective_max = MAX_DOWNLOAD_PER_SESSION
+            self._log(f"  未指定 -n，默认下载 {MAX_DOWNLOAD_PER_SESSION} 个")
+        elif effective_max > MAX_DOWNLOAD_PER_SESSION:
+            self._log(f"  ⚠ 您指定了 {effective_max} 个，超过建议上限 {MAX_DOWNLOAD_PER_SESSION}，注意风控风险")
 
         user_id = self._extract_user_id(user_url)
 
