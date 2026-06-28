@@ -38,13 +38,76 @@ MAX_DETAIL_DELAY = 15.0
 MAX_SCROLL_COUNT = 100
 
 STEALTH_JS = '''
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-window.chrome = {runtime: {}};
+// 删除 navigator.webdriver（不是设为 undefined，defineProperty 本身留痕）
+try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
+
+// 伪造 navigator.plugins（真实浏览器是 PluginArray，不是数字数组）
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const arr = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+            {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}
+        ];
+        arr.namedItem = (n) => arr.find(p => p.name === n) || null;
+        arr.refresh = () => {};
+        arr.item = (i) => arr[i] || null;
+        Object.defineProperty(arr, 'length', {get: () => 3});
+        return arr;
+    }
+});
+
+// 伪造 navigator.languages
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+
+// 完整的 window.chrome（真实 Chrome 有 app/csi/loadTimes/runtime 等）
+window.chrome = {
+    app: {
+        isInstalled: false,
+        InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'},
+        RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'},
+        getDetails: () => null,
+        getIsInstalled: () => false
+    },
+    runtime: {
+        OnInstalledReason: {CHROME_UPDATE: 'chrome_update', INSTALL: 'install', UPDATE: 'update'},
+        PlatformOs: {ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', WIN: 'win'},
+        connect: () => {},
+        sendMessage: () => {},
+    },
+    csi: () => ({startE: Date.now(), onloadT: Date.now(), pageT: Math.random()*3000, tran: 15}),
+    loadTimes: () => ({
+        requestTime: Date.now()/1000, startLoadTime: Date.now()/1000,
+        commitLoadTime: Date.now()/1000, finishDocumentLoadTime: Date.now()/1000,
+        finishLoadTime: Date.now()/1000, firstPaintTime: Date.now()/1000,
+        firstPaintAfterLoadTime: 0, navigationType: 'Other',
+        wasFetchedViaSpdy: true, wasNpnNegotiated: true,
+        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false,
+        connectionInfo: 'h2'
+    }),
+};
+
+// 伪造 navigator.permissions（真实浏览器有此 API）
+if (window.navigator.permissions) {
+    const origQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+            Promise.resolve({state: Notification.permission}) :
+            origQuery(parameters)
+    );
+}
+
+// 伪造 WebGL renderer（headless 模式下 WebGL renderer 为 SwiftShader，秒检测）
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+    return getParameter.apply(this, [parameter]);
+};
 '''
 
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+# 不再覆盖 User-Agent — UA 和浏览器实际指纹不一致是检测点
+# 用 Playwright 自带 Chromium 的默认 UA，保证一致性
 
 
 class XiaohongshuEngine(BaseEngine):
@@ -98,8 +161,13 @@ class XiaohongshuEngine(BaseEngine):
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+                # headless=False 是反检测关键：headless Chrome 缺少 GPU/字体/WebGL，
+                # 所有反爬系统都能秒检测。必须用有头模式。
+                headless=False,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--mute-audio',  # 静音音频（有头模式会播放视频声音）
+                ],
             )
 
     async def _close_browser(self):
@@ -115,8 +183,11 @@ class XiaohongshuEngine(BaseEngine):
         """创建新的浏览器上下文"""
         await self._ensure_browser()
         context = await self._browser.new_context(
-            user_agent=USER_AGENT,
+            # 不覆盖 user_agent — UA 和浏览器实际指纹不一致是检测点
+            # 用 Playwright Chromium 默认 UA，保证 UA 和 Client Hints 一致
             viewport={'width': 1920, 'height': 1080},
+            locale='zh-CN',
+            timezone_id='Asia/Shanghai',
         )
         await context.add_init_script(STEALTH_JS)
         await context.add_cookies(self._parse_cookies())
@@ -393,7 +464,22 @@ class XiaohongshuEngine(BaseEngine):
             self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s...")
             await asyncio.sleep(delay)
 
-            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            # 平滑滚动（模拟人类滚轮，不是瞬间跳到底部）
+            await page.evaluate('''() => {
+                return new Promise(resolve => {
+                    const total = document.body.scrollHeight - window.innerHeight - window.scrollY;
+                    const step = 300 + Math.random() * 200;
+                    let scrolled = 0;
+                    const timer = setInterval(() => {
+                        window.scrollBy(0, step);
+                        scrolled += step;
+                        if (scrolled >= total) {
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 100 + Math.random() * 100);
+                });
+            }''')
             await page.wait_for_timeout(3000)
 
             # 合并新捕获的 API 笔记
