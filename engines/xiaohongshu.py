@@ -836,32 +836,58 @@ class XiaohongshuEngine(BaseEngine):
                 if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                     return DownloadResult(True, item, saved_paths=[filepath], skipped=True, skip_reason="已存在")
 
-                # 下载视频（带重试，网络中断时自动重试）
+                # 下载视频（带重试 + 断点续传）
+                # 断点续传：网络中断后重试时用 Range header 从断点继续，
+                # 避免大文件反复从头下载导致在同样位置失败
                 max_retries = self.config.max_retries
                 last_error = None
                 for attempt in range(max_retries):
                     try:
-                        if attempt > 0 and os.path.exists(filepath):
-                            os.remove(filepath)
+                        # 检查已下载的字节数（断点续传）
+                        existing_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+                        download_headers = dict(headers)
+                        if existing_size > 0:
+                            download_headers['Range'] = f'bytes={existing_size}-'
+
                         async with aiohttp.ClientSession() as session:
                             async with session.get(
-                                video_url, headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=self.config.timeout, sock_read=30),
+                                video_url, headers=download_headers,
+                                timeout=aiohttp.ClientTimeout(total=600, sock_read=60),
                                 allow_redirects=True,
                             ) as resp:
                                 if resp.status == 200:
-                                    async with aiofiles.open(filepath, 'wb') as f:
-                                        async for chunk in resp.content.iter_chunked(8192):
-                                            await f.write(chunk)
-                                    saved_paths.append(filepath)
-                                    last_error = None
-                                    break
+                                    # 服务器不支持续传（返回完整内容），从头写入
+                                    if existing_size > 0:
+                                        os.remove(filepath)
+                                        existing_size = 0
+                                    mode = 'wb'
+                                    content_length = resp.content_length
+                                elif resp.status == 206:
+                                    # 断点续传成功，追加到文件
+                                    mode = 'ab'
+                                    content_length = resp.content_length
                                 else:
                                     last_error = f"HTTP {resp.status}"
                                     if attempt < max_retries - 1:
                                         await asyncio.sleep(2 * (attempt + 1))
                                         continue
                                     return DownloadResult(False, item, error=last_error)
+
+                                async with aiofiles.open(filepath, mode) as f:
+                                    async for chunk in resp.content.iter_chunked(65536):
+                                        await f.write(chunk)
+
+                                # 校验下载完整性
+                                downloaded_size = os.path.getsize(filepath)
+                                if content_length and downloaded_size < existing_size + content_length:
+                                    # 未下载完整，触发重试
+                                    raise aiohttp.ClientPayloadError(
+                                        f"下载不完整: {downloaded_size}/{existing_size + content_length} bytes"
+                                    )
+
+                                saved_paths.append(filepath)
+                                last_error = None
+                                break
                     except (aiohttp.ClientPayloadError, aiohttp.ClientOSError, ConnectionResetError, ConnectionError, asyncio.TimeoutError) as e:
                         last_error = str(e)
                         if attempt < max_retries - 1:
