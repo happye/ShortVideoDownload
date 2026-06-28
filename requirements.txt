@@ -8,3 +8,4 @@ browser-cookie3>=0.20.0
 rookiepy>=0.5.6
 xhs>=0.2.13
 playwright>=1.40.0
+patchright>=1.40.0

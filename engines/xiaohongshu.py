@@ -1,117 +1,154 @@
 """
 ShortVideoDownload - 小红书下载引擎
-使用 Playwright 真实浏览器环境，拦截浏览器自身的 API 响应获取数据
-aiohttp 直接下载视频/图片
+CDP 真实浏览器 + Patchright 协议层反检测 + aiohttp 直接下载
 
-反爬规避策略（基于全网调研 + 实测验证）:
-1. 不手动调用 API（签名格式 XYW_ 不被接受，浏览器用 XYS_）
-2. 让浏览器自己发请求（滚动触发），拦截响应 → 合法请求
-3. 滚动间隔 5-10 秒随机 → 模拟人类浏览
-4. 详情页访问间隔 10-15 秒 → 模拟人类阅读
-5. 单次下载上限 20 个 → 控制使用强度
-6. 检测到 461/captcha 立即停止 → 保护账号
+反检测策略（基于实战验证，参考 yousali.com 反检测文章）:
+1. connect_over_cdp 连接用户真实 Chrome（非 launch() 启动 Chromium）
+   - 真实 Chrome 指纹：UA / Client Hints / WebGL / Canvas 全为真值
+   - 有真实浏览历史 / 扩展 / 书签 / 其他网站 cookies
+2. Patchright 在 CDP 协议层修补 Runtime.enable / Console.enable 泄漏
+   - 不注入任何 JS（add_init_script 注入本身就是检测信号）
+3. 独立 user-data-dir 累积"生活痕迹"（一次启动后 Profile 持久化）
+4. 不覆盖 User-Agent（UA 和浏览器实际指纹必须一致）
+5. 让浏览器自己发请求（滚动触发），拦截响应 → 合法请求
+6. 滚动间隔 5-10s 随机 → 模拟人类浏览
+7. 详情页访问间隔 3-5s → 模拟人类快速浏览
+8. 单次下载上限 100 个 → 控制使用强度
+9. 检测到 461/captcha 立即停止 → 保护账号
 
 注意：window._webmsxyw 返回的 XYW_ 签名格式已被 API 拒绝（406），
       必须让浏览器自己发请求（XYS_ 格式）然后拦截响应。
 """
 import os
 import re
+import sys
 import json
+import socket
 import random
 import asyncio
+import subprocess
+from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlparse, parse_qs, urlencode
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig
 
 
 # 安全配置（基于全网调研的最佳实践）
-# 单次默认上限：100 个（详情页间隔 10-15s，约 17-25 分钟，平衡风控与需求）
+# 单次默认上限：100 个（详情页间隔 3-5s，约 5-8 分钟，平衡风控与需求）
 MAX_DOWNLOAD_PER_SESSION = 100
 # 滚动间隔（秒）- 模拟人类浏览速度
 MIN_SCROLL_DELAY = 5.0
 MAX_SCROLL_DELAY = 10.0
-# 详情页访问间隔（秒）- 模拟人类阅读时间
-MIN_DETAIL_DELAY = 10.0
-MAX_DETAIL_DELAY = 15.0
+# 详情页访问间隔（秒）- 模拟人类快速浏览节奏（真实 Chrome + Patchright 已解决指纹层检测，
+# 此处仅控制行为频率，3-5s 是真实用户快速浏览的合理间隔）
+MIN_DETAIL_DELAY = 3.0
+MAX_DETAIL_DELAY = 5.0
 # 最大滚动次数（安全上限，防无限循环；正常情况靠"连续无新增"自然停止）
 MAX_SCROLL_COUNT = 100
 
-STEALTH_JS = '''
-// 删除 navigator.webdriver（不是设为 undefined，defineProperty 本身留痕）
-try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
+# Chrome CDP 配置
+CDP_PORT = 9222
+# 独立 Profile 目录：累积浏览历史 / cookies，越来越像真实浏览器
+# 放在项目目录内（避免沙箱限制访问 home 目录），不影响用户日常 Chrome
+CHROME_USER_DATA_DIR = Path(__file__).resolve().parent.parent / '.chrome-profile'
 
-// 伪造 navigator.plugins（真实浏览器是 PluginArray，不是数字数组）
-Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-        const arr = [
-            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
-            {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}
-        ];
-        arr.namedItem = (n) => arr.find(p => p.name === n) || null;
-        arr.refresh = () => {};
-        arr.item = (i) => arr[i] || null;
-        Object.defineProperty(arr, 'length', {get: () => 3});
-        return arr;
-    }
-});
 
-// 伪造 navigator.languages
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+def _find_chrome_executable() -> str:
+    """查找系统安装的 Google Chrome 可执行文件路径"""
+    if sys.platform == 'win32':
+        candidates = [
+            Path(os.environ.get('PROGRAMFILES', 'C:\\Program Files')) / 'Google' / 'Chrome' / 'Application' / 'chrome.exe',
+            Path(os.environ.get('PROGRAMFILES(X86)', 'C:\\Program Files (x86)')) / 'Google' / 'Chrome' / 'Application' / 'chrome.exe',
+            Path(os.environ.get('LOCALAPPDATA', '')) / 'Google' / 'Chrome' / 'Application' / 'chrome.exe',
+        ]
+    elif sys.platform == 'darwin':
+        candidates = [Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')]
+    else:
+        candidates = [
+            Path('/usr/bin/google-chrome'),
+            Path('/usr/bin/google-chrome-stable'),
+            Path('/usr/bin/chromium'),
+            Path('/usr/bin/chromium-browser'),
+        ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    raise RuntimeError(
+        "未找到系统 Google Chrome，请安装 Google Chrome 浏览器。\n"
+        "下载地址: https://www.google.com/chrome/"
+    )
 
-// 完整的 window.chrome（真实 Chrome 有 app/csi/loadTimes/runtime 等）
-window.chrome = {
-    app: {
-        isInstalled: false,
-        InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'},
-        RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'},
-        getDetails: () => null,
-        getIsInstalled: () => false
-    },
-    runtime: {
-        OnInstalledReason: {CHROME_UPDATE: 'chrome_update', INSTALL: 'install', UPDATE: 'update'},
-        PlatformOs: {ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', WIN: 'win'},
-        connect: () => {},
-        sendMessage: () => {},
-    },
-    csi: () => ({startE: Date.now(), onloadT: Date.now(), pageT: Math.random()*3000, tran: 15}),
-    loadTimes: () => ({
-        requestTime: Date.now()/1000, startLoadTime: Date.now()/1000,
-        commitLoadTime: Date.now()/1000, finishDocumentLoadTime: Date.now()/1000,
-        finishLoadTime: Date.now()/1000, firstPaintTime: Date.now()/1000,
-        firstPaintAfterLoadTime: 0, navigationType: 'Other',
-        wasFetchedViaSpdy: true, wasNpnNegotiated: true,
-        npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false,
-        connectionInfo: 'h2'
-    }),
-};
 
-// 伪造 navigator.permissions（真实浏览器有此 API）
-if (window.navigator.permissions) {
-    const origQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-            Promise.resolve({state: Notification.permission}) :
-            origQuery(parameters)
-    );
-}
+def _is_port_in_use(port: int) -> bool:
+    """检查 CDP 端口是否已被监听（说明 Chrome 已在运行）"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(('127.0.0.1', port)) == 0
 
-// 伪造 WebGL renderer（headless 模式下 WebGL renderer 为 SwiftShader，秒检测）
-const getParameter = WebGLRenderingContext.prototype.getParameter;
-WebGLRenderingContext.prototype.getParameter = function(parameter) {
-    if (parameter === 37445) return 'Intel Inc.';
-    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-    return getParameter.apply(this, [parameter]);
-};
-'''
 
-# 不再覆盖 User-Agent — UA 和浏览器实际指纹不一致是检测点
-# 用 Playwright 自带 Chromium 的默认 UA，保证一致性
+def _extract_initial_state_from_html(html: str):
+    """从 HTML 中直接提取 window.__INITIAL_STATE__ 的 JSON 并解析
+
+    背景：patchright CDP 模式下，页面内联 <script>window.__INITIAL_STATE__=...</script>
+    不会在 main world 执行（可能是 CSP 或 hydration 清理），导致 page.evaluate
+    读不到 window.__INITIAL_STATE__。但 script 标签的文本内容仍在 DOM 中，
+    可以用括号匹配直接从 HTML 提取 JSON。
+
+    注意：JSON 中可能包含 undefined（JS 合法但 JSON 非法），需替换为 null。
+    """
+    marker = 'window.__INITIAL_STATE__='
+    idx = html.find(marker)
+    if idx < 0:
+        return None
+    start = html.find('{', idx)
+    if start < 0:
+        return None
+    # 括号匹配，处理字符串内的括号
+    depth = 0
+    end = -1
+    in_string = False
+    escape = False
+    for i in range(start, len(html)):
+        c = html[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\':
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0:
+        return None
+    json_str = html[start:end + 1]
+    # JS 对象字面量可能包含 undefined（JSON 标准不允许），替换为 null
+    json_str = re.sub(r'(?<=:)\s*undefined(?=\s*[,}\]])', 'null', json_str)
+    json_str = re.sub(r'(?<=[,\[])\s*undefined(?=\s*[,}\]])', 'null', json_str)
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+
+# 不再使用 STEALTH_JS 注入
+# 真实 Chrome 不需要任何 JS 修补，patchright 在 CDP 协议层完成所有反检测
+# JS 注入本身就是检测信号（属性描述符 / 原型链 / toString() 都会暴露）
 
 
 class XiaohongshuEngine(BaseEngine):
-    """小红书下载引擎 - 拦截浏览器 API 响应 + aiohttp 直接下载"""
+    """小红书下载引擎 - CDP 真实浏览器 + Patchright 协议层反检测"""
 
     platform = "xiaohongshu"
 
@@ -120,6 +157,8 @@ class XiaohongshuEngine(BaseEngine):
         self._cookie = config.cookie or self._load_cookie()
         self._playwright = None
         self._browser = None
+        self._chrome_process = None  # 脚本启动的 Chrome 子进程（None = 连接外部已启动的 Chrome）
+        self._user_agent = None  # 从浏览器获取真实 UA，供 download_item 的 HTTP 请求使用
 
     def _load_cookie(self) -> str:
         """从 cookies.txt 加载小红书 Cookie"""
@@ -156,41 +195,137 @@ class XiaohongshuEngine(BaseEngine):
         return cookies
 
     async def _ensure_browser(self):
-        """确保 Playwright 浏览器已启动"""
-        if self._browser is None:
-            from playwright.async_api import async_playwright
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                # headless=False 是反检测关键：headless Chrome 缺少 GPU/字体/WebGL，
-                # 所有反爬系统都能秒检测。必须用有头模式。
-                headless=False,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--mute-audio',  # 静音音频（有头模式会播放视频声音）
-                ],
+        """启动真实 Chrome（如未启动）并通过 Patchright CDP 连接
+
+        反检测关键点：
+        1. 用 connect_over_cdp 连接真实 Chrome，不是 launch() 启动 Chromium
+           - launch() 启动的浏览器带 --enable-automation 标记，UA 是 Chromium 不是 Chrome
+           - Client Hints brand 是 "Chromium" 而非 "Google Chrome"，秒检测
+           - 全新实例无书签 / 扩展 / 浏览历史 / 其他网站 cookies
+        2. 用 Patchright 替代 Playwright，修补 CDP 协议层泄漏
+           - Runtime.enable leak（反检测脚本能检测此命令是否被调用过）
+           - Console.enable leak（同上）
+           - 这些泄漏在 CDP 协议层完成，页面内 JS 完全透明
+        3. 独立 user-data-dir 累积"生活痕迹"
+           - 第一次启动后 Profile 持久化，浏览器越来越像真实用户
+           - 不影响用户日常 Chrome（用户日常 Chrome 用默认 Profile）
+        """
+        if self._browser is not None:
+            return
+
+        # 1. 如 CDP 端口未监听，启动真实 Chrome
+        if not _is_port_in_use(CDP_PORT):
+            chrome_path = _find_chrome_executable()
+            CHROME_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+            args = [
+                chrome_path,
+                f'--remote-debugging-port={CDP_PORT}',
+                f'--user-data-dir={CHROME_USER_DATA_DIR}',
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--disable-blink-features=AutomationControlled',
+                '--mute-audio',
+                # 不加 --headless（headless 是检测点）
+                # 不加 --no-startup-window（CDP 模式必须有窗口）
+            ]
+            self._chrome_process = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
 
+            # 等待 CDP 端口就绪（最长 15 秒）
+            for _ in range(30):
+                if _is_port_in_use(CDP_PORT):
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                raise RuntimeError(
+                    f"Chrome 启动超时，CDP 端口 {CDP_PORT} 未就绪。\n"
+                    "可能原因：已有 Chrome 实例占用，请先关闭所有 Chrome 窗口后重试。"
+                )
+
+        # 2. 用 Patchright 通过 CDP 连接（API 与 Playwright 完全兼容）
+        try:
+            from patchright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "未安装 patchright。请运行: pip install patchright\n"
+                "（patchright 是 playwright 的反检测 fork，修补了 Runtime.enable / Console.enable 协议层泄漏）"
+            )
+
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.connect_over_cdp(
+            f'http://127.0.0.1:{CDP_PORT}'
+        )
+
     async def _close_browser(self):
-        """关闭 Playwright 浏览器"""
+        """断开 CDP 连接
+
+        CDP 模式注意事项：
+        - browser.close() 仅断开 CDP 协议连接，不会关闭 Chrome 进程
+        - 不杀 Chrome 子进程 —— 让独立 Profile 持久化累积"生活痕迹"
+          （下次启动 Chrome 时这个 Profile 已经有历史，更像真实浏览器）
+        - 用户可手动关闭 Chrome，或下次脚本启动时复用同一 Profile
+        """
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
             self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
             self._playwright = None
+        # 不杀 Chrome 子进程（让 Profile 持久化）
 
     async def _new_context(self):
-        """创建新的浏览器上下文"""
+        """获取 CDP 浏览器的现有 context
+
+        CDP 模式关键限制（参考反检测文章坑 5）:
+        - 不能 new_context()，会触发 ERR_CONNECTION_CLOSED
+        - 必须用 browser.contexts[0]（Chrome 启动时自动创建的默认 context）
+        - 不调用 add_init_script（JS 注入本身就是检测信号）
+        - 真实 Chrome 不需要任何 stealth JS 修补
+        - 不覆盖 user_agent / viewport / locale / timezone
+          （UA 和浏览器实际指纹必须一致，否则 UA-Client Hints 不一致是检测点）
+        """
         await self._ensure_browser()
-        context = await self._browser.new_context(
-            # 不覆盖 user_agent — UA 和浏览器实际指纹不一致是检测点
-            # 用 Playwright Chromium 默认 UA，保证 UA 和 Client Hints 一致
-            viewport={'width': 1920, 'height': 1080},
-            locale='zh-CN',
-            timezone_id='Asia/Shanghai',
-        )
-        await context.add_init_script(STEALTH_JS)
+
+        # 用现有 context，不创建新 context
+        if self._browser.contexts:
+            context = self._browser.contexts[0]
+        else:
+            # 极少数情况下 Chrome 启动后还没有 context，创建一个
+            context = await self._browser.new_context()
+
+        # 注入 cookies（覆盖同域名同名的 cookie）
         await context.add_cookies(self._parse_cookies())
+
+        # 缓存真实 UA，供 download_item 的 HTTP 请求使用
+        if self._user_agent is None:
+            try:
+                pages = context.pages
+                if pages:
+                    self._user_agent = await pages[0].evaluate('navigator.userAgent')
+                else:
+                    new_page = await context.new_page()
+                    try:
+                        self._user_agent = await new_page.evaluate('navigator.userAgent')
+                    finally:
+                        await new_page.close()
+            except Exception:
+                # 极少数情况下获取失败，用 fallback UA（不理想但能跑）
+                self._user_agent = (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/130.0.0.0 Safari/537.36'
+                )
+
         return context
 
     @staticmethod
@@ -225,7 +360,6 @@ class XiaohongshuEngine(BaseEngine):
         user_id = self._extract_user_id(user_url)
 
         # 保留原始 URL 中的 xsec_token 等参数
-        from urllib.parse import urlparse, parse_qs, urlencode
         parsed = urlparse(user_url)
         query_params = parse_qs(parsed.query)
         profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
@@ -272,31 +406,62 @@ class XiaohongshuEngine(BaseEngine):
                 await page.goto(profile_url, wait_until='domcontentloaded', timeout=20000)
             except Exception as e:
                 self._log(f"  页面加载警告: {e}")
-            await page.wait_for_timeout(3000)
+            # 等待 Vue app 挂载 + SSR hydration 完成
+            try:
+                await page.wait_for_function(
+                    "() => { const el = document.querySelector('#app'); return el && el.__vue_app__; }",
+                    timeout=15000
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(2000)
 
-            # 检查登录状态
-            login_info = await page.evaluate('''() => {
-                try {
-                    const app = document.querySelector('#app').__vue_app__;
-                    const pinia = app.config.globalProperties.$pinia;
-                    const userStore = pinia._s.get('user');
+            # 从 HTML 直接提取 __INITIAL_STATE__（patchright CDP 模式下 inline script
+            # 不在 main world 执行，window.__INITIAL_STATE__ 读取不到，必须从 HTML 提取）
+            html = await page.content()
+            initial_state = _extract_initial_state_from_html(html)
+
+            # 检查登录状态：优先用 __INITIAL_STATE__.user，fallback 到 DOM 信号
+            nickname = ''
+            logged_in = False
+            if initial_state and initial_state.get('user'):
+                user_state = initial_state['user']
+                logged_in = bool(user_state.get('loggedIn'))
+                user_info = user_state.get('userInfo') or {}
+                nickname = user_info.get('nickname', '')
+
+            # Fallback：__INITIAL_STATE__ 拿不到时用 DOM 信号
+            if not logged_in:
+                dom_login_check = await page.evaluate('''() => {
+                    const loginBtn = document.querySelector('.login-btn, [class*="login-container"]');
+                    const url = window.location.href;
+                    const hasLoginRedirect = url.includes('/login') || url.includes('signin');
+                    const userAvatar = document.querySelector(
+                        '[class*="user-avatar"], [class*="avatar-wrapper"], [class*="user-info"]'
+                    );
                     return {
-                        loggedIn: userStore?.loggedIn,
-                        nickname: userStore?.userInfo?.nickname || '',
+                        hasLoginButton: !!loginBtn,
+                        hasLoginRedirect: hasLoginRedirect,
+                        hasUserAvatar: !!userAvatar,
                     };
-                } catch(e) {
-                    return {error: e.message};
-                }
-            }''')
+                }''')
+                if dom_login_check.get('hasUserAvatar') and not dom_login_check.get('hasLoginRedirect'):
+                    logged_in = True
+                    # 从页面标题提取昵称（格式: "昵称 - 小红书"）
+                    try:
+                        title = await page.title()
+                        if ' - 小红书' in title:
+                            nickname = title.split(' - 小红书')[0]
+                    except Exception:
+                        pass
 
-            if not login_info or not login_info.get('loggedIn'):
+            if not logged_in:
                 raise RuntimeError(
                     "小红书 Cookie 已失效或未登录，无法获取笔记数据。\n"
                     "请重新导出 cookies.txt 中的 xiaohongshu.com Cookie。"
                 )
 
-            nickname = login_info.get('nickname', '')
-            self._log(f"  已登录: {nickname}")
+            self._log(f"  已登录: {nickname or page.url}")
 
             # 获取笔记列表（拦截器已在 goto 前注册，复用 captured_data）
             notes = await self._scroll_and_intercept_notes(page, effective_max, captured_data)
@@ -339,7 +504,13 @@ class XiaohongshuEngine(BaseEngine):
 
         finally:
             page.remove_listener('response', on_response)
-            await context.close()
+            # CDP 模式下不调用 context.close()
+            # 原因：context 是 Chrome 默认 context（browser.contexts[0]），
+            # close() 会关闭所有 page，可能影响用户的其他标签页
+            try:
+                await page.close()
+            except Exception:
+                pass
             await self._close_browser()
 
     async def fetch_single_item(self, note_id: str, original_url: str = None) -> Optional[DownloadItem]:
@@ -360,7 +531,6 @@ class XiaohongshuEngine(BaseEngine):
         # 从原始 URL 提取 xsec_token
         xsec_token = ''
         if original_url:
-            from urllib.parse import urlparse, parse_qs
             parsed = urlparse(original_url)
             params = parse_qs(parsed.query)
             if params.get('xsec_token'):
@@ -395,20 +565,23 @@ class XiaohongshuEngine(BaseEngine):
 
             return item
         finally:
-            await context.close()
+            # CDP 模式下不调用 context.close()（同 fetch_user_items）
             await self._close_browser()
 
     async def _scroll_and_intercept_notes(self, page, max_count: int, captured_data: dict) -> list:
         """获取笔记列表：SSR 数据为主，API 拦截为辅，滚动补充更多
 
         数据源优先级：
-        1. __INITIAL_STATE__.user.notes._rawValue[0] — SSR 渲染的笔记（含完整 xsecToken）
+        1. __INITIAL_STATE__.user.notes — SSR 渲染的笔记（含完整 xsecToken）
            ※ user_posted API 的 cursor 会跳过前 30 个，只返回更早的 4 个，has_more=False，
               无法靠 API 拿到全部笔记。SSR 是唯一可靠的首屏数据源。
         2. user_posted API 拦截器捕获的笔记（SSR 之外的更多笔记，需滚动触发）
 
         字段命名：SSR 中是 xsecToken（驼峰），API 响应中是 xsec_token（下划线），
         此处统一保留原字段名，_fetch_note_detail_via_page 会兼容两种命名。
+
+        注意：patchright CDP 模式下 inline script 不在 main world 执行，
+        window.__INITIAL_STATE__ 读取不到，必须从 page.content() 的 HTML 提取。
         """
         notes = []
         seen_ids = set()
@@ -419,32 +592,28 @@ class XiaohongshuEngine(BaseEngine):
                 seen_ids.add(nid)
                 notes.append(n)
 
-        # 1. 从 __INITIAL_STATE__ 提取 SSR 笔记（主要数据源）
+        # 1. 从 HTML 提取 __INITIAL_STATE__，获取 SSR 笔记（主要数据源）
         self._log(f"  从 __INITIAL_STATE__ 提取 SSR 笔记...")
-        await page.wait_for_timeout(2000)
-        ssr_notes = await page.evaluate('''() => {
-            try {
-                const state = window.__INITIAL_STATE__;
-                const tabs = state.user.notes._rawValue;
-                for (let i = 0; i < tabs.length; i++) {
-                    const tab = tabs[i];
-                    if (Array.isArray(tab) && tab.length > 0) {
-                        return tab.map(n => ({
-                            note_id: n.id,
-                            id: n.id,
-                            xsecToken: n.xsecToken || '',
-                            display_title: n.noteCard ? n.noteCard.displayTitle : '',
-                            type: n.noteCard ? n.noteCard.type : '',
-                        }));
-                    }
-                }
-                return [];
-            } catch(e) {
-                return [];
-            }
-        }''')
-        for n in ssr_notes:
-            _add(n)
+        html = await page.content()
+        initial_state = _extract_initial_state_from_html(html)
+        if initial_state:
+            user_state = initial_state.get('user') or {}
+            tabs = user_state.get('notes') or []
+            # notes 是数组的数组（每个 tab 一个数组），取第一个非空 tab
+            for tab in tabs:
+                if isinstance(tab, list):
+                    for n in tab:
+                        if not isinstance(n, dict):
+                            continue
+                        note_id = n.get('id', '')
+                        nc = n.get('noteCard') or {}
+                        _add({
+                            'note_id': note_id,
+                            'id': note_id,
+                            'xsecToken': n.get('xsecToken', ''),  # camelCase
+                            'display_title': nc.get('displayTitle', ''),
+                            'type': nc.get('type', ''),
+                        })
         self._log(f"  SSR 笔记: {len(notes)} 个")
 
         # 2. 合并 API 拦截器已捕获的笔记（goto 期间就发出的首次响应）
@@ -506,8 +675,11 @@ class XiaohongshuEngine(BaseEngine):
 
     async def _fetch_note_detail_via_page(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
         """
-        访问笔记详情页，从 Pinia store 读取详情数据
+        访问笔记详情页，从 HTML 中的 __INITIAL_STATE__ 读取详情数据
         详情通过 SSR 渲染，不调用 feed API（已验证）
+
+        注意：patchright CDP 模式下 inline script 不在 main world 执行，
+        Pinia store 为空，必须从 page.content() 的 HTML 提取 __INITIAL_STATE__。
         """
         note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
         # 兼容两种命名：SSR 中是 xsecToken（驼峰），API 响应中是 xsec_token（下划线）
@@ -517,70 +689,76 @@ class XiaohongshuEngine(BaseEngine):
         if xsec_token:
             note_url += f'?xsec_token={xsec_token}&xsec_source=pc_note'
 
-        # 访问详情页（浏览器会通过 SSR 加载数据到 Pinia store）
+        # 访问详情页（浏览器会通过 SSR 渲染数据到 __INITIAL_STATE__）
         try:
             await page.goto(note_url, wait_until='domcontentloaded', timeout=15000)
         except Exception:
             pass
         await page.wait_for_timeout(2000)
 
-        # 从 Pinia store 读取详情数据（camelCase 格式）
-        detail = await page.evaluate('''(noteId) => {
-            try {
-                const app = document.querySelector('#app').__vue_app__;
-                const pinia = app.config.globalProperties.$pinia;
-                const noteStore = pinia._s.get('note');
-                const detailMap = noteStore?.noteDetailMap || {};
-                const detail = detailMap[noteId] || Object.values(detailMap)[0];
-                if (!detail) return null;
-                const note = detail.note;
-                if (!note) return null;
-
-                // 提取视频 URL
-                let videoUrl = '';
-                if (note.video) {
-                    const streams = note.video.media?.stream;
-                    if (streams) {
-                        for (const k of ['h264', 'h265', 'av1']) {
-                            if (streams[k] && streams[k][0]) {
-                                videoUrl = streams[k][0].masterUrl || '';
-                                if (!videoUrl && streams[k][0].backupUrls) {
-                                    videoUrl = streams[k][0].backupUrls[0] || '';
-                                }
-                                if (videoUrl) break;
-                            }
-                        }
-                    }
-                }
-
-                // 提取图片 URL 列表
-                let imageUrls = [];
-                if (note.imageList) {
-                    imageUrls = note.imageList.map(img => {
-                        const infoList = img.infoList || [];
-                        const dft = infoList.find(il => il.imageScene === 'WB_DFT');
-                        return dft?.url || img.urlDefault || '';
-                    }).filter(u => u);
-                }
-
-                return {
-                    type: note.type || '',
-                    title: note.title || '',
-                    desc: note.desc || '',
-                    noteId: note.noteId || noteId,
-                    videoUrl: videoUrl,
-                    imageUrls: imageUrls,
-                    coverUrl: note.imageList?.[0]?.urlDefault || note.video?.image?.firstFrame || '',
-                    nickname: note.user?.nickname || '',
-                    createTime: note.time || 0,
-                };
-            } catch(e) {
-                return null;
-            }
-        }''', note_id)
-
-        if not detail:
+        # 从 HTML 提取 __INITIAL_STATE__，再从中读取 note 详情
+        html = await page.content()
+        initial_state = _extract_initial_state_from_html(html)
+        if not initial_state:
             return None
+
+        # note 详情在 state.note.noteDetailMap[note_id].note
+        note_store = initial_state.get('note') or {}
+        detail_map = note_store.get('noteDetailMap') or {}
+        # 优先用 note_id 查找，找不到就用第一个 entry
+        detail_entry = detail_map.get(note_id)
+        if not detail_entry:
+            for v in detail_map.values():
+                detail_entry = v
+                break
+        if not detail_entry:
+            return None
+
+        note = detail_entry.get('note') or {}
+        if not note:
+            return None
+
+        # 提取视频 URL
+        video_url = ''
+        video = note.get('video')
+        if video:
+            streams = (video.get('media') or {}).get('stream') or {}
+            for k in ('h264', 'h265', 'av1'):
+                stream_list = streams.get(k) or []
+                if stream_list:
+                    video_url = stream_list[0].get('masterUrl', '') or ''
+                    if not video_url:
+                        backup = stream_list[0].get('backupUrls') or []
+                        if backup:
+                            video_url = backup[0]
+                    if video_url:
+                        break
+
+        # 提取图片 URL 列表
+        image_urls = []
+        image_list = note.get('imageList') or []
+        for img in image_list:
+            info_list = img.get('infoList') or []
+            dft = None
+            for il in info_list:
+                if il.get('imageScene') == 'WB_DFT':
+                    dft = il
+                    break
+            url = (dft or {}).get('url') or img.get('urlDefault') or ''
+            if url:
+                image_urls.append(url)
+
+        detail = {
+            'type': note.get('type', ''),
+            'title': note.get('title', ''),
+            'desc': note.get('desc', ''),
+            'noteId': note.get('noteId') or note_id,
+            'videoUrl': video_url,
+            'imageUrls': image_urls,
+            'coverUrl': (image_list[0].get('urlDefault') if image_list else '') or (video.get('image') or {}).get('firstFrame', ''),
+            'nickname': (note.get('user') or {}).get('nickname', ''),
+            'createTime': note.get('time', 0),
+        }
 
         # 确定类型和 URL
         note_type = detail.get('type', '')
@@ -638,7 +816,13 @@ class XiaohongshuEngine(BaseEngine):
         try:
             headers = {
                 "Referer": "https://www.xiaohongshu.com/",
-                "User-Agent": USER_AGENT,
+                # 用浏览器的真实 UA（CDP 模式下从 navigator.userAgent 获取）
+                # UA 必须和浏览器实际指纹一致，否则 UA-Client Hints 不一致是检测点
+                "User-Agent": self._user_agent or (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/130.0.0.0 Safari/537.36'
+                ),
             }
 
             if item.is_video:

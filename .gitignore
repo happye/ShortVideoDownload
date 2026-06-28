@@ -40,6 +40,9 @@ desktop.ini
 # f2 config
 .f2/
 
+# Chrome CDP Profile (xiaohongshu engine)
+.chrome-profile/
+
 # Logs
 logs/
 *.log

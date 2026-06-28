@@ -170,17 +170,23 @@ output/
 - `webday7_st`（7天免登录）不够，API 返回 "No Login"
 
 ### 小红书
-- Playwright 真实浏览器环境（stealth 模式 + cookie 注入），aiohttp 直接请求会被识别为未登录
-- 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
-  - **笔记列表**：以 SSR `__INITIAL_STATE__.user.notes._rawValue[0]` 为主（含完整 `xsecToken`），user_posted API 拦截为辅
-    - 不能依赖 user_posted API 拿首屏：API 的 cursor 会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记，导致只能下载时间最早的几个文件
+- 反检测架构：真实 Chrome + Patchright CDP 连接（`connect_over_cdp`），不是 `launch()` 启动 Chromium
+  - 独立 user-data-dir（`~/.shortvideo_download/chrome-profile`）累积浏览历史 / cookies，越来越像真实浏览器
+  - Patchright 修补 `Runtime.enable` / `Console.enable` CDP 协议层泄漏，不注入任何 stealth JS
+  - 不覆盖 UA / viewport / locale / timezone（UA 必须和浏览器实际指纹一致）
+- 数据来源：从 `page.content()` 的 HTML 中直接提取 `window.__INITIAL_STATE__` 的 JSON
+  - **不能用 `page.evaluate('window.__INITIAL_STATE__')`**：patchright CDP 模式下页面内联 `<script>` 不在 main world 执行
+  - 模块级函数 `_extract_initial_state_from_html(html)`：括号匹配 + `undefined`→`null` 正则替换 → `json.loads`
+  - **笔记列表**：以 SSR `__INITIAL_STATE__.user.notes[0]` 为主（notes 是数组的数组，含完整 `xsecToken`），user_posted API 拦截为辅
+    - 不能依赖 user_posted API 拿首屏：API 的 cursor 会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记
     - 字段命名：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
-  - 笔记详情：从 `noteStore.noteDetailMap[note_id].note` 读取
+  - 笔记详情：从 `__INITIAL_STATE__.note.noteDetailMap[note_id].note` 提取
 - **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
-- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
-- 详情页访问间隔 10-15 秒，单次上限 20 个（避免触发风控）
+- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，连续 2 次无新增停止，安全上限 100 次）
+- 详情页访问间隔 3-5 秒（真实用户快速浏览节奏），单次上限 100 个（避免触发风控）
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
+- 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA）
 
 ### B站
 - 使用旧 API `x/space/arc/search`（不需要 wbi 签名）

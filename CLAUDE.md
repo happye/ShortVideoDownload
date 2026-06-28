@@ -47,12 +47,30 @@
 - 当 `bit_rate` 为空时，必须回退到 `video.play_addr.url_list`（直接播放地址）
 - 无 URL 的条目（非视频非图集）应跳过，不加入下载队列
 
-### 小红书引擎（Playwright）
+### 小红书引擎（CDP + Patchright 反检测）
+- **反检测架构（基于 yousali.com 反检测实战文章验证）**：
+  - **用 `connect_over_cdp` 连接真实 Chrome**，不是 `launch()` 启动 Chromium
+    - launch() 启动的浏览器带 `--enable-automation` 标记，UA 是 Chromium 不是 Chrome
+    - Client Hints brand 是 `"Chromium"` 而非 `"Google Chrome"`，秒检测
+    - 全新实例无书签 / 扩展 / 浏览历史 / 其他网站 cookies
+  - **用 Patchright 替代 Playwright**（`pip install patchright`）
+    - 修补 `Runtime.enable` / `Console.enable` CDP 协议层泄漏
+    - 协议层修补对页面 JS 完全透明（不注入任何 JS）
+  - **绝对不要 `add_init_script` 注入 stealth JS**：JS 注入本身就是检测信号
+    - `Object.defineProperty` 留下 getter 痕迹，`toString()` 暴露非 native 代码
+    - 真实 Chrome 不需要任何 JS 修补，patchright 在协议层完成所有反检测
+  - **不覆盖 `user_agent` / `viewport` / `locale` / `timezone`**：UA 必须和浏览器实际指纹一致，否则 UA-Client Hints 不一致是检测点
+  - **独立 user-data-dir**（`~/.shortvideo_download/chrome-profile`）：累积浏览历史 / cookies，越来越像真实浏览器；不影响用户日常 Chrome
+  - **CDP 模式下不要 `new_context()`**：会触发 `ERR_CONNECTION_CLOSED`，必须用 `browser.contexts[0]`
+  - **CDP 模式下不要 `context.close()`**：会关闭 Chrome 默认 context 的所有标签页，影响用户其他标签页；只 `page.close()`
+  - **`_close_browser` 不杀 Chrome 子进程**：让独立 Profile 持久化累积"生活痕迹"
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
-- 必须用 Playwright 真实浏览器环境获取数据（stealth 模式 + cookie 注入）
-- 数据来源：Vue 3 Pinia store（`document.querySelector('#app').__vue_app__.config.globalProperties.$pinia`）
-  - 笔记列表：**SSR `__INITIAL_STATE__.user.notes._rawValue[0]` 为主**（含完整 xsecToken），user_posted API 拦截为辅（补充 SSR 之外的更多笔记）
-  - 笔记详情：`noteStore.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
+- 数据来源：从 `page.content()` 的 HTML 中直接提取 `window.__INITIAL_STATE__` 的 JSON
+  - **不要用 `page.evaluate('window.__INITIAL_STATE__')`**：patchright CDP 模式下页面内联 `<script>window.__INITIAL_STATE__=...</script>` 不在 main world 执行（evaluate 本身确实在 main world，能访问 DOM 元素属性如 `__vue_app__`，但读不到 inline script 设置的 window 全局变量，`__SSR__` 同理读不到）
+  - 模块级函数 `_extract_initial_state_from_html(html)` 实现提取：`marker` 定位 → 括号匹配（处理字符串内的括号）→ `undefined`→`null` 正则替换（JS 对象字面量可含 `undefined`，JSON 标准不允许）→ `json.loads`
+  - 三处复用：登录检测（`user.loggedIn` / `user.userInfo.nickname`）/ SSR 笔记提取 / 笔记详情提取
+  - 笔记列表：**SSR `__INITIAL_STATE__.user.notes[0]` 为主**（notes 是数组的数组，每个 tab 一个数组；含完整 xsecToken），user_posted API 拦截为辅（补充 SSR 之外的更多笔记）
+  - 笔记详情：`__INITIAL_STATE__.note.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
 - **不能依赖 user_posted API 拿首屏**：API 的 cursor 会跳过前 30 个，只返回 4 个 `has_more=False` 的更早笔记，必须从 SSR 提取
 - **字段命名陷阱**：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
 - **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
@@ -60,6 +78,7 @@
 - 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
 - `max_count` 在获取详情前应用，避免不必要地获取所有详情
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
+- 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA），保证 UA 和浏览器指纹一致
 
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
