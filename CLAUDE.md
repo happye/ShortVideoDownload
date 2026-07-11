@@ -39,7 +39,7 @@
 
 ### 单视频链接下载
 - `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 URL 格式（`/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`）
-- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`，小红书用 Playwright 访问详情页（从 `original_url` 提取 `xsec_token`）
+- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`，小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；快手/B站/微博未实现 `fetch_single_item`，不支持单视频下载
 - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
 
 ### 抖音视频URL回退
@@ -75,10 +75,11 @@
 - **字段命名陷阱**：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
 - **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
-- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，最多 5 次）
+- 翻页：滚动页面到底部触发新请求（5-10 秒间隔，连续 2 次无新增停止，安全上限 100 次）
 - `max_count` 在获取详情前应用，避免不必要地获取所有详情
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
 - 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA），保证 UA 和浏览器指纹一致
+- **大文件断点续传**：重试时用 `Range: bytes={已下载大小}-` header 从断点继续，不删除已下载部分（避免 95MB+ 大文件在 CDN 断流处反复失败）；timeout `total=600, sock_read=60`；chunk 64KB
 
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
@@ -128,6 +129,6 @@ python fix_names.py "用户URL" "output/douyin/用户目录"
 |------|------|------|
 | 抖音 | f2 | 可用（需 Cookie） |
 | 快手 | Web API | 需 web_st Cookie |
-| 小红书 | HTML解析+yt-dlp | 需有效 Cookie |
-| B站 | 旧API+yt-dlp | 需有效 Cookie |
+| 小红书 | Chrome CDP+Patchright | 需有效 Cookie |
+| B站 | wbi API+yt-dlp | 需有效 Cookie |
 | 微博 | Web API | 需有效 Cookie |

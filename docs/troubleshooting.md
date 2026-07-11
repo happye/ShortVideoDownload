@@ -143,13 +143,15 @@
 
 ---
 
-### 抖音网络中断下载失败
+### 下载中断：ContentLengthError / ConnectionResetError
 
-**现象**：`ContentLengthError: Not enough data` 或 `ConnectionResetError`
+**现象**：`ContentLengthError: Not enough data` 或 `ConnectionResetError`，视频只下载了一部分（如 48MB/95MB）。
 
-**原因**：网络不稳定导致传输中断
+**原因**：网络不稳定导致传输中断，大文件更容易触发。
 
-**解决**：已内置 3 次重试机制（指数退避 2s→4s→6s），自动清理不完整文件后重试
+**解决**：
+- 抖音：内置 3 次重试（指数退避 2s→4s→6s），自动清理不完整文件后从头重试
+- 小红书：**断点续传**——重试时用 `Range: bytes={已下载大小}-` header 从断点继续，不删除已下载部分；timeout 600s，chunk 64KB。支持 `status=206`（续传成功）和 `status=200`（服务器不支持续传时回退到从头下载）
 
 ---
 

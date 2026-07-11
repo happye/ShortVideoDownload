@@ -21,14 +21,14 @@
 - **下载文件**：`aiohttp` 直接下载视频/图片流
 - **日志抑制**：f2 的 `log_setup()` 在 import 时初始化 logger（INFO 级别 + RichHandler），需要 monkey-patch `rich_console` + 设置 CRITICAL 级别
 
-### 2. Playwright 引擎（小红书专用）
+### 2. Chrome CDP + Patchright 引擎（小红书专用）
 
-小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空。因此使用 Playwright 真实浏览器环境获取数据。
+小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空。因此使用真实 Chrome + Patchright CDP 连接获取数据（反检测架构详见 [CLAUDE.md 小红书引擎章节](../CLAUDE.md)）。
 
-- **获取列表**：Playwright 访问用户主页，从 Vue 3 Pinia store 提取笔记列表，滚动加载翻页
-- **获取详情**：Playwright 访问笔记详情页，从 Pinia store 提取视频/图片 URL
-- **下载文件**：`aiohttp` 直接下载视频/图片流（与抖音一致）
-- **stealth 模式**：隐藏 webdriver 特征，注入 cookie
+- **获取列表**：CDP 连接的真实 Chrome 访问用户主页，从 HTML 提取 `__INITIAL_STATE__` 笔记列表，滚动加载翻页
+- **获取详情**：真实 Chrome 访问笔记详情页，从 HTML 提取 `__INITIAL_STATE__.note.noteDetailMap` 中的视频/图片 URL
+- **下载文件**：`aiohttp` 直接下载视频/图片流（与抖音一致），支持断点续传
+- **反检测**：Patchright 协议层修补 CDP 泄漏 + 独立 user-data-dir 累积浏览痕迹 + cookie 注入
 
 ### 3. yt-dlp + 自研 API（其他平台）
 
@@ -163,7 +163,7 @@ output/
 - `https://www.xiaohongshu.com/discovery/item/{note_id}` — 旧格式
 - `https://www.xiaohongshu.com/note/{note_id}` — 笔记直链
 
-小红书 `fetch_single_item(note_id, original_url)` 从 `original_url` 提取 `xsec_token`，用 Playwright 访问详情页，复用 `_fetch_note_detail_via_page` 从 Pinia store 读取详情。
+小红书 `fetch_single_item(note_id, original_url)` 从 `original_url` 提取 `xsec_token`，用 CDP 连接的真实 Chrome 访问详情页，复用 `_fetch_note_detail_via_page` 从 HTML 提取 `__INITIAL_STATE__` 读取详情。
 
 ### 快手
 - GraphQL API 需要 `web_st` Cookie（session cookie，浏览器导出不包含）

@@ -4,12 +4,12 @@
 
 ## 功能特性
 
-- 按用户下载：输入用户主页链接，批量下载该用户所有视频和图片
-- 单视频下载：直接给单视频链接（抖音 `/video/{id}`、`?modal_id=`、`/note/{id}`、`iesdouyin.com/share/video/{id}`；小红书 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`），自动识别作者并归档到对应用户名目录
+- 按用户下载：输入用户主页链接，批量下载该用户所有视频和图片（全平台支持）
+- 单视频下载：直接给单视频/图集链接，自动识别作者并归档到对应用户名目录（仅抖音、小红书支持）
 - 高清/超清：自动选择最高画质，支持 4K/1080P
-- 自动归档：以用户名创建文件夹，原视频名命名文件
-- 智能去重：基于 item_id 判断，已下载视频自动跳过，不会重复下载
 - 自动归档：以用户名创建文件夹，文件名包含视频ID确保唯一
+- 智能去重：基于 item_id 判断，已下载视频自动跳过，不会重复下载
+- 断点续传：大文件下载中断后自动从断点继续（小红书），避免反复从头下载失败
 - 环境隔离：独立 venv 虚拟环境，不影响系统 Python
 - Cookie 提取：支持从浏览器自动提取 Cookie（推荐 Firefox）
 - cookies.txt 支持：支持 Netscape 格式的 Cookie 文件
@@ -17,13 +17,15 @@
 
 ## 支持平台
 
-| 平台 | 支持内容 | 下载引擎 | Cookie |
-|------|----------|----------|--------|
-| 抖音 | 视频 + 图集 | f2 | 必需 |
-| 快手 | 视频 + 图集 | Web API | 必需 |
-| 小红书 | 视频 + 图集 | Chrome CDP + Patchright + aiohttp | 必需 |
-| B站 | 视频 | B站 wbi API + yt-dlp | 必需 |
-| 微博 | 视频 + 图集 | 微博 Web API | 必需 |
+| 平台 | 支持内容 | 下载引擎 | Cookie | 单视频下载 |
+|------|----------|----------|--------|------------|
+| 抖音 | 视频 + 图集 | f2 | 必需 | ✅ 支持 |
+| 快手 | 视频 + 图集 | Web API | 必需 | ❌ 不支持 |
+| 小红书 | 视频 + 图集 | Chrome CDP + Patchright + aiohttp | 必需 | ✅ 支持 |
+| B站 | 视频 | B站 wbi API + yt-dlp | 必需 | ❌ 不支持 |
+| 微博 | 视频 + 图集 | 微博 Web API | 必需 | ❌ 不支持 |
+
+> **单视频下载说明**：仅抖音和小红书支持直接下载单个视频/图集链接。抖音支持 `/video/{id}`、`/note/{id}`、`?modal_id=`、`iesdouyin.com/share/video/{id}` 四种格式；小红书支持 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}` 三种格式（可带 `?xsec_token=` 参数）。
 
 > **重要**：所有平台目前都需要登录 Cookie 才能获取用户作品列表。这是各平台的风控策略，不是工具限制。
 
@@ -165,7 +167,7 @@ ShortVideoDownload/
 │   ├── base.py         # 引擎基类
 │   ├── douyin.py       # 抖音引擎 (f2)
 │   ├── kuaishou.py     # 快手引擎 (Web API)
-│   ├── xiaohongshu.py  # 小红书引擎 (HTML解析 + yt-dlp)
+│   ├── xiaohongshu.py  # 小红书引擎 (Chrome CDP + Patchright)
 │   ├── bilibili.py     # B站引擎 (旧API + yt-dlp)
 │   └── weibo.py        # 微博引擎 (Web API)
 ├── docs/
