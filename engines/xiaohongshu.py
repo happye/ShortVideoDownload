@@ -224,10 +224,13 @@ class XiaohongshuEngine(BaseEngine):
                 f'--user-data-dir={CHROME_USER_DATA_DIR}',
                 '--no-first-run',
                 '--no-default-browser-check',
-                '--disable-blink-features=AutomationControlled',
                 '--mute-audio',
                 # 不加 --headless（headless 是检测点）
                 # 不加 --no-startup-window（CDP 模式必须有窗口）
+                # 不加 --disable-blink-features=AutomationControlled：
+                #   真实 Chrome 用户启动永远不会带这个参数，是 Playwright/Puppeteer
+                #   的经典反检测标记，反而暴露自动化身份。patchright 已在协议层
+                #   修补 navigator.webdriver，不依赖此参数。
             ]
             self._chrome_process = subprocess.Popen(
                 args,
@@ -633,22 +636,19 @@ class XiaohongshuEngine(BaseEngine):
             self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s...")
             await asyncio.sleep(delay)
 
-            # 平滑滚动（模拟人类滚轮，不是瞬间跳到底部）
-            await page.evaluate('''() => {
-                return new Promise(resolve => {
-                    const total = document.body.scrollHeight - window.innerHeight - window.scrollY;
-                    const step = 300 + Math.random() * 200;
-                    let scrolled = 0;
-                    const timer = setInterval(() => {
-                        window.scrollBy(0, step);
-                        scrolled += step;
-                        if (scrolled >= total) {
-                            clearInterval(timer);
-                            resolve();
-                        }
-                    }, 100 + Math.random() * 100);
-                });
-            }''')
+            # 真实鼠标滚轮滚动（不用 page.evaluate + window.scrollBy，
+            # 后者不触发 wheel 事件，网站可监听 wheel vs scrollY 区分真假滚动）
+            # 分多步滚动，每步 100-200 像素（接近真实鼠标滚轮一次的量），随机间隔
+            import random as _random
+            scroll_y = await page.evaluate('window.scrollY')
+            total_height = await page.evaluate('document.body.scrollHeight')
+            viewport_h = await page.evaluate('window.innerHeight')
+            remaining = total_height - viewport_h - scroll_y
+            while remaining > 0:
+                step = _random.randint(100, 200)
+                await page.mouse.wheel(0, step)
+                await asyncio.sleep(0.05 + _random.random() * 0.08)
+                remaining -= step
             await page.wait_for_timeout(3000)
 
             # 合并新捕获的 API 笔记

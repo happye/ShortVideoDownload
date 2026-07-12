@@ -64,6 +64,8 @@
   - **CDP 模式下不要 `new_context()`**：会触发 `ERR_CONNECTION_CLOSED`，必须用 `browser.contexts[0]`
   - **CDP 模式下不要 `context.close()`**：会关闭 Chrome 默认 context 的所有标签页，影响用户其他标签页；只 `page.close()`
   - **`_close_browser` 不杀 Chrome 子进程**：让独立 Profile 持久化累积"生活痕迹"
+  - **不要加 `--disable-blink-features=AutomationControlled` 启动参数**：真实 Chrome 用户永远不会带此参数，它是 Playwright/Puppeteer 的经典反检测标记，通过 `chrome://version` 或 `process.argv` 直接可见。patchright 已在协议层修补 `navigator.webdriver`，不依赖此参数
+  - **滚动用 `page.mouse.wheel()`，不要用 `page.evaluate('window.scrollBy()')`**：后者不触发 wheel 事件，网站可监听 wheel 事件 vs scrollY 变化区分真假滚动
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
 - 数据来源：从 `page.content()` 的 HTML 中直接提取 `window.__INITIAL_STATE__` 的 JSON
   - **不要用 `page.evaluate('window.__INITIAL_STATE__')`**：patchright CDP 模式下页面内联 `<script>window.__INITIAL_STATE__=...</script>` 不在 main world 执行（evaluate 本身确实在 main world，能访问 DOM 元素属性如 `__vue_app__`，但读不到 inline script 设置的 window 全局变量，`__SSR__` 同理读不到）
