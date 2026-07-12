@@ -184,13 +184,13 @@ output/
 - **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
 - 笔记详情页 URL 需带 `xsec_token` 参数：`/explore/{note_id}?xsec_token={token}&xsec_source=pc_note`
 - 翻页：滚动页面到底部触发新请求（5-10 秒间隔，连续 2 次无新增停止，安全上限 100 次）
-- 详情页访问间隔 3-5 秒（真实用户快速浏览节奏），单次上限 100 个（避免触发风控）
+- 详情页访问间隔 3-5 秒（真实用户快速浏览节奏），默认不限数量（滚动到底）
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
 - 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA）
 
 ### B站
-- 使用旧 API `x/space/arc/search`（不需要 wbi 签名）
-- 新 API `x/space/wbi/arc/search` 的 wbi 签名算法已失效
+- 使用 wbi API `x/space/wbi/arc/search`（需要 wbi 签名）
+- 旧 API `x/space/arc/search` 不需要 wbi 签名但已限速
 - -799 频率限制：3次重试，指数退避
 
 ### 微博
