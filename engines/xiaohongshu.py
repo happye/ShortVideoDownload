@@ -36,8 +36,7 @@ from config import DownloadConfig
 
 
 # 安全配置（基于全网调研的最佳实践）
-# 单次默认上限：100 个（详情页间隔 3-5s，约 5-8 分钟，平衡风控与需求）
-MAX_DOWNLOAD_PER_SESSION = 100
+
 # 滚动间隔（秒）- 模拟人类浏览速度
 MIN_SCROLL_DELAY = 5.0
 MAX_SCROLL_DELAY = 10.0
@@ -350,20 +349,15 @@ class XiaohongshuEngine(BaseEngine):
                 "  3. 导出 cookies.txt 文件放到项目根目录"
             )
 
-        # 单次下载上限保护
-        # -1（未指定 -n）→ 用默认上限 100（保护新用户，避免风控）
-        # 0（显式 -n 0）→ 真正不限，滚动到底，打印风控警告
-        # N（-n N）→ 尊重用户选择，超过 100 给风控警告但不强制限制
+        # 下载数量限制
+        # 0（默认）→ 不限，滚动到底
+        # N（-n N）→ 限制数量
         effective_max = self.config.max_count
-        if effective_max == -1:
-            effective_max = MAX_DOWNLOAD_PER_SESSION
-            self._log(f"  未指定 -n，默认下载 {MAX_DOWNLOAD_PER_SESSION} 个（用 -n 0 下载所有）")
-        elif effective_max == 0:
-            # 真正不限：用一个大数，实际靠"连续 2 次无新增"停止滚动
+        if effective_max == 0:
+            # 不限：用一个大数，实际靠"连续 2 次无新增"停止滚动
             effective_max = 10**9
-            self._log(f"  -n 0 指定，下载所有内容（滚动到底），注意风控")
-        elif effective_max > MAX_DOWNLOAD_PER_SESSION:
-            self._log(f"  ⚠ 您指定了 {effective_max} 个，超过建议上限 {MAX_DOWNLOAD_PER_SESSION}，注意风控风险")
+        else:
+            self._log(f"  限制下载 {effective_max} 个")
 
         user_id = self._extract_user_id(user_url)
 

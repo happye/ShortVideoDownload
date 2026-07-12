@@ -54,8 +54,8 @@ class DownloadConfig:
     """下载配置"""
     # 保存路径
     save_dir: str = DEFAULT_SAVE_DIR
-    # 最大下载数量 (-1=未指定用平台默认, 0=真正不限, N=指定值)
-    max_count: int = -1
+    # 最大下载数量 (0=下载所有, N=限制数量)
+    max_count: int = 0
     # 日期范围
     date_from: Optional[str] = None
     date_to: Optional[str] = None
