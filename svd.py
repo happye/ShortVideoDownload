@@ -110,8 +110,8 @@ def parse_args():
     parser.add_argument(
         "-n", "--max-count",
         type=int,
-        default=0,
-        help="最大下载数量 (0=无限制, 默认: 0)"
+        default=None,
+        help="最大下载数量 (0=下载所有, 默认: 平台建议上限 100)"
     )
     parser.add_argument(
         "--date-from",
@@ -216,7 +216,7 @@ def build_config(args) -> DownloadConfig:
     # 命令行参数覆盖配置文件
     if args.output:
         cfg.save_dir = os.path.abspath(args.output)
-    if args.max_count:
+    if args.max_count is not None:
         cfg.max_count = args.max_count
     if args.date_from:
         cfg.date_from = args.date_from

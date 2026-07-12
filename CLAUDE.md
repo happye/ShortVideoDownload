@@ -18,7 +18,8 @@
 - 不要在 `download_item()` 中保存 `.txt` 描述文件（`save_desc` 默认 False）
 - 不要移除 f2 的 logging handler（会导致 f2 内部重新添加），改为设置 CRITICAL 级别
 - 不要在 CLAUDE.md 里写历史叙事或变更日志
-- **不要用 Edit/Write 工具修改 `run.bat`**：它是 GBK 编码，Edit/Write 会用 UTF-8 读写导致"锟斤拷"乱码。`run.bat` 已设为只读 + `.gitattributes` 标记 `binary` 双重保护。如需修改，必须用 Python 脚本以 GBK 编码读写，并先 `Set-ItemProperty run.bat -Name IsReadOnly -Value $false` 取消只读
+- `max_count` 三态语义：`-1`（未指定，用平台默认上限）/ `0`（显式 `-n 0`，真正不限，滚动到底）/ `N`（指定值）。config.py 默认 `-1`，svd.py argparse `default=None` + `if args.max_count is not None:` 区分"未指定"和"显式 0"
+- **不要用 Edit/Write 工具修改 `run.bat`**：它是 GBK 编码，Edit/Write 会用 UTF-8 读写导致"锟斤拷"乱码。`run.bat` 已设为只读 + `.gitattributes` 标记 `binary` 双重保护。**如发现 run.bat 被修改（只读被取消或字节数变化），立即用 `git checkout HEAD -- run.bat` 恢复并 `Set-ItemProperty run.bat -Name IsReadOnly -Value $true` 重新设只读**。如需修改 run.bat 内容，必须用 Python 脚本以 GBK 编码读写，并先取消只读
 
 ### f2 库处理
 - f2 的日志有两个来源：logging 系统 + `rich_console.print()` 直接输出

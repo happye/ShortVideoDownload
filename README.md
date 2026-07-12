@@ -104,8 +104,9 @@ python svd.py "https://www.kuaishou.com/profile/3x..." --cookie "your_cookie_str
 # 仅预览不下载
 python svd.py "https://www.douyin.com/user/MS4w..." --dry-run --browser-cookie firefox
 
-# 限制下载数量
+# 限制下载数量（-n 0 = 下载所有，默认上限 100）
 python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..." -n 20 --browser-cookie firefox
+python svd.py "https://www.xiaohongshu.com/user/profile/5f..." -n 0
 ```
 
 ### Cookie 配置
