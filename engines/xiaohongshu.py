@@ -158,6 +158,10 @@ class XiaohongshuEngine(BaseEngine):
         self._browser = None
         self._chrome_process = None  # 脚本启动的 Chrome 子进程（None = 连接外部已启动的 Chrome）
         self._user_agent = None  # 从浏览器获取真实 UA，供 download_item 的 HTTP 请求使用
+        # 反检测：缓存浏览器的 sec-ch-ua 和 platform，供 CDN 下载请求使用
+        # UA-Client Hints 必须和浏览器实际指纹一致，否则是检测点
+        self._sec_ch_ua = None
+        self._sec_ch_ua_platform = None
 
     def _load_cookie(self) -> str:
         """从 cookies.txt 加载小红书 Cookie"""
@@ -308,18 +312,39 @@ class XiaohongshuEngine(BaseEngine):
         # 注入 cookies（覆盖同域名同名的 cookie）
         await context.add_cookies(self._parse_cookies())
 
-        # 缓存真实 UA，供 download_item 的 HTTP 请求使用
+        # 缓存真实 UA 和 UA-Client Hints，供 download_item 的 CDN 请求使用
+        # UA-Client Hints 必须和浏览器实际指纹一致，否则是检测点
         if self._user_agent is None:
             try:
                 pages = context.pages
-                if pages:
-                    self._user_agent = await pages[0].evaluate('navigator.userAgent')
-                else:
-                    new_page = await context.new_page()
-                    try:
-                        self._user_agent = await new_page.evaluate('navigator.userAgent')
-                    finally:
-                        await new_page.close()
+                page_for_ua = pages[0] if pages else await context.new_page()
+                try:
+                    ua_data = await page_for_ua.evaluate('''() => ({
+                        ua: navigator.userAgent,
+                        brands: navigator.userAgentData ? navigator.userAgentData.brands : null,
+                        platform: navigator.userAgentData ? navigator.userAgentData.platform : (navigator.platform || 'Windows'),
+                    })''')
+                    self._user_agent = ua_data.get('ua') or (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) '
+                        'Chrome/130.0.0.0 Safari/537.36'
+                    )
+                    # 从 navigator.userAgentData.brands 构造 sec-ch-ua
+                    brands = ua_data.get('brands') or []
+                    if brands:
+                        # brands 格式: [{brand: "Chromium", version: "130"}, ...]
+                        self._sec_ch_ua = ', '.join(
+                            f'"{b["brand"]}";v="{b["version"]}"' for b in brands
+                        )
+                    else:
+                        # fallback：从 UA 提取 Chrome 版本号
+                        chrome_ver = re.search(r'Chrome/(\d+)', self._user_agent)
+                        cv = chrome_ver.group(1) if chrome_ver else '130'
+                        self._sec_ch_ua = f'"Chromium";v="{cv}", "Not?A_Brand";v="99", "Google Chrome";v="{cv}"'
+                    self._sec_ch_ua_platform = f'"{ua_data.get("platform") or "Windows"}"'
+                finally:
+                    if not pages:
+                        await page_for_ua.close()
             except Exception:
                 # 极少数情况下获取失败，用 fallback UA（不理想但能跑）
                 self._user_agent = (
@@ -327,6 +352,8 @@ class XiaohongshuEngine(BaseEngine):
                     'AppleWebKit/537.36 (KHTML, like Gecko) '
                     'Chrome/130.0.0.0 Safari/537.36'
                 )
+                self._sec_ch_ua = '"Chromium";v="130", "Not?A_Brand";v="99", "Google Chrome";v="130"'
+                self._sec_ch_ua_platform = '"Windows"'
 
         return context
 
@@ -805,24 +832,51 @@ class XiaohongshuEngine(BaseEngine):
             description=desc,
         )
 
+    def _build_cdn_headers(self, is_video: bool = True) -> dict:
+        """构建 CDN 下载请求的完整 headers
+
+        反检测关键点：
+        1. 必须带完整的 sec-* headers（Chrome 必发，缺失是检测信号）
+        2. sec-ch-ua 版本号必须和浏览器实际版本一致（从 navigator.userAgentData 获取）
+        3. sec-fetch-dest 按资源类型区分（video / image）
+        4. Accept 按资源类型区分
+        5. 不带 cookies（CDN 跨域，真实浏览器也不带 xiaohongshu.com cookies 到 xhscdn.com）
+        """
+        return {
+            "Referer": "https://www.xiaohongshu.com/",
+            "User-Agent": self._user_agent or (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/130.0.0.0 Safari/537.36'
+            ),
+            "Accept": "*/*" if is_video else "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "sec-ch-ua": self._sec_ch_ua or '"Chromium";v="130", "Not?A_Brand";v="99", "Google Chrome";v="130"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": self._sec_ch_ua_platform or '"Windows"',
+            "sec-fetch-dest": "video" if is_video else "image",
+            "sec-fetch-mode": "no-cors",
+            "sec-fetch-site": "cross-site",
+            "Origin": "https://www.xiaohongshu.com",
+        }
+
     async def download_item(self, item: DownloadItem, save_dir: str) -> DownloadResult:
-        """下载单个小红书笔记（HTTP 直接下载，与抖音引擎一致）"""
+        """下载单个小红书笔记（HTTP 直接下载，与抖音引擎一致）
+
+        反检测说明：
+        - CDN 请求带完整 sec-* headers，和浏览器指纹一致
+        - 复用 ClientSession（TCP keep-alive），模拟真实浏览器连接复用
+        - 不带 cookies（CDN 跨域，真实浏览器也不带）
+        """
         import aiohttp
         import aiofiles
 
         saved_paths = []
 
         try:
-            headers = {
-                "Referer": "https://www.xiaohongshu.com/",
-                # 用浏览器的真实 UA（CDP 模式下从 navigator.userAgent 获取）
-                # UA 必须和浏览器实际指纹一致，否则 UA-Client Hints 不一致是检测点
-                "User-Agent": self._user_agent or (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/130.0.0.0 Safari/537.36'
-                ),
-            }
+            is_video = item.is_video
+            headers = self._build_cdn_headers(is_video=is_video)
 
             if item.is_video:
                 video_url = item.urls[0] if item.urls else ""
@@ -902,10 +956,11 @@ class XiaohongshuEngine(BaseEngine):
                 if os.path.exists(first_img_path):
                     return DownloadResult(True, item, saved_paths=[first_img_path], skipped=True, skip_reason="已存在")
 
-                for idx, img_url in enumerate(item.urls):
-                    filepath = self._make_filepath(save_dir, item, ".jpg", idx=idx + 1)
+                # 复用同一个 ClientSession（模拟浏览器 TCP keep-alive）
+                async with aiohttp.ClientSession() as session:
+                    for idx, img_url in enumerate(item.urls):
+                        filepath = self._make_filepath(save_dir, item, ".jpg", idx=idx + 1)
 
-                    async with aiohttp.ClientSession() as session:
                         async with session.get(
                             img_url, headers=headers,
                             timeout=aiohttp.ClientTimeout(total=self.config.timeout),
@@ -922,8 +977,9 @@ class XiaohongshuEngine(BaseEngine):
                 cover_path = self._make_filepath(save_dir, item, "_cover.jpg")
                 if not os.path.exists(cover_path):
                     try:
+                        cover_headers = self._build_cdn_headers(is_video=False)
                         async with aiohttp.ClientSession() as session:
-                            async with session.get(item.cover_url, headers=headers,
+                            async with session.get(item.cover_url, headers=cover_headers,
                                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
                                 if resp.status == 200:
                                     async with aiofiles.open(cover_path, 'wb') as f:

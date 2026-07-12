@@ -157,6 +157,12 @@ class BaseEngine(ABC):
 
             results.append(result)
 
+            # 反检测：下载间隔（模拟真实用户浏览节奏，避免连续请求 CDN 触发频率风控）
+            if idx < total and not result.skipped:
+                import random
+                delay = random.uniform(2.0, 5.0)
+                await asyncio.sleep(delay)
+
         return results
 
     def _scan_existing_items(self, save_dir: str) -> set:
