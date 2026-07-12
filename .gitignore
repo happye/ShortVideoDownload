@@ -43,6 +43,9 @@ desktop.ini
 # Chrome CDP Profile (xiaohongshu engine)
 .chrome-profile/
 
+# Checkpoint files (xiaohongshu crash recovery)
+output/**/_checkpoint.json
+
 # Logs
 logs/
 *.log

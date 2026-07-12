@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from engines.base import BaseEngine, DownloadItem, DownloadResult
+from engines.base import BaseEngine, DownloadItem, DownloadResult, sanitize_dirname
 from config import DownloadConfig
 
 
@@ -501,38 +501,130 @@ class XiaohongshuEngine(BaseEngine):
                 return []
 
             # 逐个获取笔记详情（通过访问详情页，拦截 feed API 响应）
+            # 反 OOM：每 20 个笔记重建一次 page（释放 Chrome 内存）
+            # 崩溃恢复：checkpoint 保存已获取的详情，崩溃重启可从断点继续
             items = []
             total = len(notes)
+            checkpoint_path = os.path.join(
+                self.config.save_dir, self.platform,
+                sanitize_dirname(nickname or user_id), '_checkpoint.json'
+            )
+            # 尝试从 checkpoint 恢复（支持崩溃后重新运行）
+            checkpoint_done_ids = set()
+            checkpoint_items = []
+            if os.path.exists(checkpoint_path):
+                try:
+                    with open(checkpoint_path, 'r', encoding='utf-8') as f:
+                        cp = json.loads(f.read())
+                    checkpoint_done_ids = set(cp.get('done_ids', []))
+                    checkpoint_items = cp.get('items', [])
+                    if checkpoint_done_ids:
+                        self._log(f"  从 checkpoint 恢复: 已完成 {len(checkpoint_done_ids)} 个，继续获取剩余...")
+                        # 从 dict 重建 DownloadItem 对象
+                        for item_dict in checkpoint_items:
+                            items.append(DownloadItem(
+                                item_id=item_dict.get('item_id', ''),
+                                item_type=item_dict.get('item_type', ''),
+                                title=item_dict.get('title', ''),
+                                urls=item_dict.get('urls', []),
+                                url=item_dict.get('url'),
+                                create_time=item_dict.get('create_time'),
+                                nickname=item_dict.get('nickname'),
+                                uid=item_dict.get('uid'),
+                                cover_url=item_dict.get('cover_url'),
+                                thumbnail=item_dict.get('thumbnail'),
+                                music_url=item_dict.get('music_url'),
+                                description=item_dict.get('description'),
+                                duration=item_dict.get('duration'),
+                            ))
+                except Exception:
+                    pass  # checkpoint 损坏，从头开始
+
+            # 找到第一个未完成的笔记索引
+            start_idx = 0
             for idx, note_info in enumerate(notes, 1):
                 note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
-                if not note_id:
+                if note_id and note_id not in checkpoint_done_ids:
+                    start_idx = idx - 1
+                    break
+
+            self._log(f"  从第 {start_idx + 1} 个笔记开始获取详情")
+
+            for idx in range(start_idx, total):
+                note_info = notes[idx]
+                note_id = note_info.get('note_id') or note_info.get('noteId') or note_info.get('id', '')
+                if not note_id or note_id in checkpoint_done_ids:
                     continue
 
-                self._log(f"  [{idx}/{total}] 获取详情: {note_info.get('display_title', '')[:40]}")
+                self._log(f"  [{idx + 1}/{total}] 获取详情: {note_info.get('display_title', '')[:40]}")
+
+                # 每 20 个笔记重建 page（释放 Chrome 内存，防止 OOM）
+                if idx > start_idx and (idx - start_idx) % 20 == 0:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    page = await context.new_page()
+                    self._log(f"  [内存优化] 重建 page（已处理 {idx - start_idx} 个）")
 
                 try:
                     item = await self._fetch_note_detail_via_page(page, note_info, nickname)
                     if item:
                         items.append(item)
+                        checkpoint_done_ids.add(note_id)
+                        # 每 5 个保存一次 checkpoint（崩溃恢复用）
+                        if len(checkpoint_done_ids) % 5 == 0:
+                            self._save_checkpoint(checkpoint_path, items, checkpoint_done_ids)
                     else:
-                        self._log(f"  [{idx}/{total}] 跳过: 无法获取详情")
+                        self._log(f"  [{idx + 1}/{total}] 跳过: 无法获取详情")
+                        checkpoint_done_ids.add(note_id)  # 跳过的也标记为已完成，避免重试
                 except RuntimeError as e:
                     # 检测到风控，立即停止
                     if 'captcha' in str(e).lower() or 'blocked' in str(e).lower() or '461' in str(e):
                         self._log(f"  ⚠ 检测到风控限制，停止获取以保护账号: {e}")
+                        # 风控时保存 checkpoint，下次运行可继续
+                        self._save_checkpoint(checkpoint_path, items, checkpoint_done_ids)
+                        self._log(f"  已保存 checkpoint（{len(checkpoint_done_ids)} 个），下次运行可继续")
                         break
                     raise
+                except Exception as e:
+                    # Page navigating / OOM 等错误：保存 checkpoint，继续下一个
+                    self._log(f"  [{idx + 1}/{total}] 出错（已保存 checkpoint）: {e}")
+                    self._save_checkpoint(checkpoint_path, items, checkpoint_done_ids)
+                    # 尝试重建 page 继续
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                    try:
+                        page = await context.new_page()
+                    except Exception:
+                        # context 也挂了，需要重建整个浏览器会话
+                        self._log(f"  ⚠ 浏览器会话崩溃，正在重建...")
+                        await self._close_browser()
+                        context = await self._new_context()
+                        page = await context.new_page()
 
-                # 随机延时（10-15 秒，模拟人类阅读）
-                if idx < total:
+                # 随机延时（3-5 秒，模拟人类快速浏览）
+                if idx < total - 1:
                     delay = self._random_delay(MIN_DETAIL_DELAY, MAX_DETAIL_DELAY)
                     self._log(f"  等待 {delay:.1f}s（模拟阅读）...")
                     await asyncio.sleep(delay)
 
+            # 全部完成，清理 checkpoint
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+                self._log(f"  全部完成，已清理 checkpoint")
+
             return items
 
         finally:
-            page.remove_listener('response', on_response)
+            # 注意：page 可能在循环中被重建（OOM 防护），此处只关闭当前 page
+            # remove_listener 可能因 page 重建而失效，try-except 忽略
+            try:
+                page.remove_listener('response', on_response)
+            except Exception:
+                pass
             # CDP 模式下不调用 context.close()
             # 原因：context 是 Chrome 默认 context（browser.contexts[0]），
             # close() 会关闭所有 page，可能影响用户的其他标签页
@@ -698,6 +790,37 @@ class XiaohongshuEngine(BaseEngine):
                 consecutive_empty = 0
 
         return notes[:max_count]
+
+    def _save_checkpoint(self, path: str, items: list, done_ids: set):
+        """保存进度到 checkpoint 文件，支持崩溃后恢复"""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # 只保存可序列化的字段（DownloadItem 是 dataclass）
+            serializable_items = []
+            for item in items:
+                serializable_items.append({
+                    'item_id': item.item_id,
+                    'item_type': item.item_type,
+                    'title': item.title,
+                    'urls': item.urls,
+                    'url': item.url,
+                    'create_time': item.create_time,
+                    'nickname': item.nickname,
+                    'uid': item.uid,
+                    'cover_url': item.cover_url,
+                    'thumbnail': item.thumbnail,
+                    'music_url': item.music_url,
+                    'description': item.description,
+                    'duration': item.duration,
+                })
+            checkpoint = {
+                'done_ids': list(done_ids),
+                'items': serializable_items,
+            }
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(checkpoint, f, ensure_ascii=False)
+        except Exception:
+            pass  # checkpoint 失败不影响主流程
 
     async def _fetch_note_detail_via_page(self, page, note_info: dict, nickname: str) -> Optional[DownloadItem]:
         """
