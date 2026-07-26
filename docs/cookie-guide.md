@@ -69,7 +69,7 @@ python svd.py "URL" --cookie "复制的Cookie字符串"
 | 抖音 | `sessionid` 等 | f2 库自动处理 |
 | 快手 | `kuaishou.server.web_st` | session cookie，浏览器导出工具不包含此值 |
 | 小红书 | 登录态 Cookie | 未登录时 302 重定向 |
-| B站 | `SESSDATA` | 登录凭证 |
+| B站 | `SESSDATA` | 登录凭证；无 Cookie 触发 412 风控，连免费 1080p 都拿不到 |
 | 微博 | 登录态 Cookie | 未登录无法获取列表 |
 
 ### 快手 web_st 问题
@@ -82,6 +82,41 @@ python svd.py "URL" --cookie "复制的Cookie字符串"
 ```
 .kuaishou.com	TRUE	/	TRUE	0	kuaishou.server.web_st	你的web_st值
 ```
+
+## B站 Cookie 专用获取工具
+
+B站无 Cookie 会触发 412 Precondition Failed 风控，连免费的 1080p 都拿不到（1080p 不需要大会员，但必须登录）。Edge/Chrome v130+ 的 App-Bound Encryption 阻止外部程序读取 Cookie，常规方式（rookiepy、browser_cookie3、`yt-dlp --cookies-from-browser edge/chrome`）均失效。
+
+### 推荐：`_fetch_bili_cookie.py`（自动绕过 App-Bound Encryption）
+
+```bash
+python _fetch_bili_cookie.py
+```
+
+工作原理：
+1. 用 Patchright 启动 Edge/Chrome（独立 Profile 目录 `.edge-bili-profile/`，不影响日常浏览器）
+2. 通过 CDP 协议连接（patchright 修补 `Runtime.enable` / `Console.enable` 协议层泄漏）
+3. 打开 bilibili.com，未登录时引导用户在浏览器中登录
+4. 浏览器进程自己解密 Cookie，通过 CDP `Network.getCookies` 拿明文
+5. 保存到项目根 `cookies.txt`（Netscape 格式），后续自动复用
+
+**首次运行**：会打开浏览器窗口让用户登录 B站，登录后按回车。
+**后续运行**：独立 Profile 已持久化登录态，自动复用，无需重新登录。
+**自动触发**：`svd.py` 检测到 B站 URL 且无 Cookie 时，会自动调用此工具。
+
+### 备选：从 Firefox 提取
+
+如果 Firefox 已登录 B站，可直接用 `--browser-cookie firefox`（Firefox 不受 App-Bound Encryption 影响）：
+
+```bash
+python svd.py "URL" --browser-cookie firefox
+```
+
+### Cookie 持久化
+
+- `_fetch_bili_cookie.py` 保存到 `cookies.txt`，会被 gitignore 不会提交
+- 独立 Profile 在 `.edge-bili-profile/`（也被 gitignore），下次自动登录
+- Cookie 过期后重新运行 `_fetch_bili_cookie.py` 即可
 
 ## Cookie 安全
 

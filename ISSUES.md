@@ -2,6 +2,31 @@
 
 ## 修改记录
 
+### 2026-07-26 B站 Cookie 文件 expires=-1 导致 yt-dlp 跳过 SESSDATA
+
+- **问题**：运行 `_fetch_bili_cookie.py` 登录后下载视频仍失败，错误 `WARNING: skipping cookie file entry due to invalid expires at -1`
+- **根因**：Playwright/CDP 返回的 session cookie 的 `expires=-1`（表示会话级），`_fetch_bili_cookie.py` 原样写入 cookies.txt。但 yt-dlp 的 Netscape 格式要求 `expires` 是 `0`（session）或正数 Unix 时间戳，遇到 `-1` 直接跳过该条 Cookie。关键 Cookie（SESSDATA）被跳过后触发 412 风控
+- **修复**：
+  1. `_fetch_bili_cookie.py` 保存 Cookie 时 `expires < 0` 转为 `0`（Netscape session cookie 标准值）
+  2. `engines/bilibili.py` `download_item` 错误信息从「stderr 前 500 字符」改为「末尾 1500 字符」，避免 yt-dlp 的 WARNING 淹没真正的 ERROR
+- **修改文件**：`_fetch_bili_cookie.py`、`engines/bilibili.py`
+- **验证**：重新运行 `_fetch_bili_cookie.py`（不需重新登录，独立 Profile 已持久化）覆盖 cookies.txt 后下载成功
+
+### 2026-07-26 B站引擎重构 + 412 风控 + Cookie 获取工具
+
+- **问题**：B站下载报 `HTTP 412 Precondition Failed`，画质只有 480p（浏览器能看 1080p）
+- **根因**：B站要求登录 Cookie 才能访问视频格式列表，没 Cookie 连免费的 1080p 都拿不到（直接 412 拒绝）。1080p 不需要大会员，但必须登录
+- **附加问题**：Edge/Chrome v130+ App-Bound Encryption 阻止外部程序读取 Cookie，rookiepy / browser_cookie3 / `yt-dlp --cookies-from-browser edge/chrome` 均失效
+- **修复方案**：
+  1. B站引擎完全基于 yt-dlp 重构（旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` API 已废弃 404；新 API 需 wbi 签名且 -799/412 风控严格）
+  2. 新增 `_fetch_bili_cookie.py`：用 Patchright 启动 Edge/Chrome（独立 Profile `.edge-bili-profile/`）+ CDP 拿明文 Cookie，绕过 App-Bound Encryption
+  3. `svd.py` 检测到 B站且无 Cookie 时自动调用 `_fetch_bili_cookie.py`
+  4. `utils.load_cookies_from_file` 添加备用域名支持（bilibili.cn / bilibili.tv）
+  5. 画质默认 `best`（最高视频+最高音频），通过 yt-dlp `-f` 格式选择实现
+- **修改文件**：`engines/bilibili.py`、`svd.py`、`utils.py`、`_fetch_bili_cookie.py`（新增）、`docs/troubleshooting.md`、`docs/cookie-guide.md`、`docs/architecture.md`、`CLAUDE.md`、`README.md`、`.gitignore`
+- **验证**：从原本只能拿到 480p 升级到 1080p（普通账号即可，不需大会员）
+- **删除**：`_update_bili_cookie.py`（rookiepy.firefox 实现，被 `--browser-cookie firefox` 取代）
+
 ### 2026-06-25 抖音 HTTP 400 Cookie Too Large 修复
 
 - 问题 #27: 抖音视频下载报 HTTP 400 → 已修复
@@ -239,9 +264,9 @@
 | 抖音 | ❌ f2签名失效 | ❌ f2签名失效 | 待验证 | 需f2更新 |
 | 快手 | ❌ result=2 | 待验证 | 待验证 | 正常 |
 | 小红书 | ❌ 302重定向到登录页 | 待验证 | 待验证 | 正常 |
-| B站 | ❌ -352风控 | ❌ Cookie过期 | 待验证 | 正常 |
+| B站 | ❌ 412 Precondition Failed | ❌ Cookie过期 | ✅ 1080p（普通账号即可） | 正常 |
 
-**结论**: 所有平台都需要有效的登录Cookie才能正常工作。当前代码逻辑已修复，但需要用户提供有效Cookie进行端到端测试。
+**结论**: 所有平台都需要有效的登录Cookie才能正常工作。B站无 Cookie 直接 412 拒绝（连 480p 都拿不到），有 Cookie 后普通账号可下 1080p（不需大会员）。
 
 ---
 
@@ -253,11 +278,13 @@
 | yt-dlp --cookies-from-browser | 失败(DPAPI) | 失败(DPAPI) | 正常 | yt-dlp内置 |
 | browser_cookie3 | 返回0个 | 需管理员 | 正常 | Python实现 |
 | cookies.txt 文件 | 正常 | 正常 | 正常 | 手动导出，最可靠 |
+| `_fetch_bili_cookie.py`（B站专用） | ✅ 正常 | ✅ 正常 | 无需 | Patchright + CDP 拿明文，绕过 App-Bound Encryption |
 
 **推荐方案**:
 1. 首选：使用 Firefox 浏览器 + `--browser-cookie firefox`
 2. 次选：手动导出 `cookies.txt` 文件放到项目根目录
-3. 最后：使用 `--cookie` 参数手动提供 Cookie 字符串
+3. B站专用：运行 `python _fetch_bili_cookie.py`（Edge/Chrome 用户必备，绕过 App-Bound Encryption）
+4. 最后：使用 `--cookie` 参数手动提供 Cookie 字符串
 
 ---
 

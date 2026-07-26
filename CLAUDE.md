@@ -45,10 +45,12 @@
 
 ### B站引擎（完全基于 yt-dlp）
 - **不再自调B站 API**：旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` 已废弃返回 404；新 API 需要 wbi 签名且风控严格（频繁 -799 / 412）。yt-dlp 内部维护 API 路径和签名，跟着升级，最稳定
+- **Cookie 必需**：B站无 Cookie 触发 412 Precondition Failed 风控，连免费的 1080p 都拿不到（1080p 不需要大会员，但必须登录）。`svd.py` 检测到 B站且无 Cookie 时自动调用 `_fetch_bili_cookie.py`（Patchright 启动 Edge/Chrome 独立 Profile + CDP 拿明文 Cookie，绕过 App-Bound Encryption）
 - **`fetch_user_items`**：用 `yt-dlp --flat-playlist -O "%(id)s"` 列出用户所有视频，**自动处理投稿/合集/系列/子合集**，保证视频列表完整
 - **标题占位**：flat-playlist 模式拿不到标题，`item.title` 用 BV 号占位；下载时 yt-dlp 用真实标题命名文件
 - **UP 主昵称**：调一次 `view` API 拿第一个视频的 `owner.name`，用于按昵称创建目录（失败时目录名 "unknown"）
 - **`download_item`**：用 yt-dlp `-o "%(title)s_%(id)s.%(ext)s"` 模板命名文件（真实标题+BV号后缀），`--print after_move:filepath` 获取实际保存路径
+- **画质选择**：`best`（默认，最高视频+最高音频）/ `hd`（≤1080p）/ `sd`（≤720p），通过 yt-dlp `-f` 格式选择实现
 - **去重**：`_scan_existing_items` 识别文件名中的 BV 号（`BV[A-Za-z0-9]{10}`）和 av 号（`av\d+`）
 - **URL 兼容性**：`_extract_uid` 用 `space\.bilibili\.com/(\d+)` 提取 UID，支持所有 space 子路径（主页、`/upload/video`、`/dynamic`、`/channel/collectionDetail?sid=xxx`、`/channel/seriesDetail?sid=xxx` 等），yt-dlp 自动按 URL 类型列出对应视频
 - **Cookie 优先级**：`--cookies-from-browser` > 项目根 `cookies.txt` > 临时文件（从 `--cookie` 字符串生成）

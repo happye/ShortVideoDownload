@@ -9,7 +9,7 @@
                               (rookiepy → cookies.txt → 手动)
 ```
 
-## 双引擎架构
+## 三引擎架构
 
 项目使用三套下载引擎：
 
@@ -30,11 +30,11 @@
 - **下载文件**：`aiohttp` 直接下载视频/图片流（与抖音一致），支持断点续传
 - **反检测**：Patchright 协议层修补 CDP 泄漏 + 独立 user-data-dir 累积浏览痕迹 + cookie 注入
 
-### 3. yt-dlp + 自研 API（其他平台）
+### 3. yt-dlp + 自研 API（快手/微博）
 
-快手、B站、微博使用自研 API 获取作品列表，yt-dlp 负责实际下载。
+快手、微博使用自研 API 获取作品列表，yt-dlp 负责实际下载。B站完全基于 yt-dlp（不再自调 API）。
 
-- **获取列表**：各平台引擎自行实现 `fetch_user_items()`
+- **获取列表**：各平台引擎自行实现 `fetch_user_items()`（B站用 `yt-dlp --flat-playlist`）
 - **下载文件**：调用 `yt-dlp` 命令行工具，通过 `--cookies` 传递 Cookie
 
 ## 核心类
@@ -199,7 +199,9 @@ output/
 - 标题占位：flat-playlist 拿不到标题，`item.title` 用 BV 号占位；下载时 yt-dlp 用真实标题命名文件
 - UP 主昵称：调一次 `view` API 拿第一个视频的 `owner.name`（失败时目录名 "unknown"）
 - URL 兼容性：`_extract_uid` 用 `space\.bilibili\.com/(\d+)` 提取 UID，支持所有 space 子路径（主页、`/upload/video`、`/dynamic`、`/channel/collectionDetail?sid=xxx`、`/channel/seriesDetail?sid=xxx`）
-- Cookie 优先级：`--cookies-from-browser` > 项目根 `cookies.txt` > 临时文件（从 `--cookie` 字符串生成）
+- **Cookie 必需**：B站无 Cookie 触发 412 Precondition Failed 风控，连免费的 1080p 都拿不到（1080p 不需要大会员，但必须登录）。Cookie 优先级：`--cookies-from-browser` > 项目根 `cookies.txt` > 临时文件（从 `--cookie` 字符串生成）
+- **Cookie 自动获取**：`svd.py` 检测到 B站且无 Cookie 时自动调用 `_fetch_bili_cookie.py`，该工具用 Patchright 启动 Edge/Chrome（独立 Profile `.edge-bili-profile/`），通过 CDP 拿明文 Cookie 保存到 `cookies.txt`，绕过 Edge v130+ App-Bound Encryption
+- 画质选择：`best`（默认，最高视频+最高音频）/ `hd`（≤1080p）/ `sd`（≤720p），通过 yt-dlp `-f` 格式选择实现
 - 单视频下载：`fetch_single_item` 调用 `view` API 拿标题/UP主，失败退化为 video_id 作标题
 
 ### 微博

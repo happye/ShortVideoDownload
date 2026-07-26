@@ -54,6 +54,47 @@
 
 ---
 
+### B站 HTTP 412 Precondition Failed / 下载画质低 / 只有 480p
+
+**现象**：
+- 错误提示 `HTTP Error 412: Precondition Failed`
+- 下载的视频只有 480p，但明明在浏览器里能看 1080p
+
+**原因**：B站要求登录 Cookie 才能访问视频格式列表，没 Cookie 连免费的 1080p 都拿不到（直接 412 拒绝）。
+注意：1080p 不需要大会员，但**必须登录**（普通账号即可）。
+
+**解决**（任选其一）：
+
+1. **专用 Cookie 获取工具（推荐）**：
+   ```bash
+   python _fetch_bili_cookie.py
+   ```
+   自动启动 Edge/Chrome（独立 Profile，不影响你日常使用的浏览器），在浏览器中登录一次 B站，Cookie 自动保存到 `cookies.txt`。
+   以后 Cookie 持久化，无需重复登录。
+
+2. **从 Firefox 提取**（如果 Firefox 已登录 B站）：
+   ```bash
+   python svd.py "URL" --browser-cookie firefox
+   ```
+   Firefox 不受 App-Bound Encryption 限制，可以直接提取。
+
+3. **手动导出 cookies.txt**：
+   在浏览器装 "Get cookies.txt LOCALLY" 扩展，登录 B站后导出，将文件放到项目根目录。
+
+4. **手动提供 Cookie 字符串**：
+   F12 → Network → 刷新 → 找 bilibili.com 的请求 → 复制 Cookie 头 →
+   ```bash
+   python svd.py "URL" --cookie "复制的值"
+   ```
+
+**注意**：
+- Edge/Chrome v130+ 的 App-Bound Encryption 会阻止外部程序读取 Cookie，
+  必须用方案 1（Patchright CDP 拿明文）或方案 2（Firefox）。
+- `_fetch_bili_cookie.py` 使用独立 Profile（`.edge-bili-profile/`），
+  不影响你日常使用的 Edge/Chrome。
+
+---
+
 ### B站 yt-dlp 列出视频失败 / 下载超时
 
 **现象**：`yt-dlp 列出视频失败`、`未找到任何视频`、或下载超时
@@ -65,7 +106,7 @@
 
 **解决**：
 1. 重新导出 cookies.txt，确认 B站 `SESSDATA` Cookie 有效
-2. 尝试 `--browser-cookie chrome` 从浏览器提取 Cookie
+2. 尝试 `--browser-cookie firefox` 从 Firefox 提取 Cookie
 3. 安装 yt-dlp：`pip install yt-dlp`
 4. 减少下载数量：`python svd.py "URL" -n 10`
 

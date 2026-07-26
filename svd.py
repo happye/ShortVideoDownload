@@ -401,6 +401,61 @@ async def run_download(url: str, config: DownloadConfig, mode: str, dry_run: boo
                 else:
                     print(f"从 cookies.txt 加载 Cookie 成功 ({len(config.cookie)} 字符)")
 
+    # B站专用：如果仍无 Cookie，自动调用 _fetch_bili_cookie.py 引导用户获取
+    # 原因：B站无 Cookie 会触发 412 风控，连免费 1080p 都拿不到
+    # Edge v130+ App-Bound Encryption 阻止外部读取，必须用 Patchright CDP 拿明文 Cookie
+    if platform == "bilibili" and not config.cookie and not config.browser_cookie:
+        if RICH_AVAILABLE:
+            console.print("[yellow]! B站需要 Cookie 才能下载（无 Cookie 会触发 412 风控，连免费 1080p 都拿不到）[/yellow]")
+            console.print("[dim]   Edge v130+ App-Bound Encryption 阻止外部读取 Cookie，必须用 Patchright CDP 拿明文 Cookie[/dim]")
+            console.print("[dim]   即将启动 Cookie 获取工具（需要关闭 Edge 浏览器）...[/dim]")
+        else:
+            print("B站需要 Cookie 才能下载（无 Cookie 会触发 412 风控，连免费 1080p 都拿不到）")
+            print("即将启动 Cookie 获取工具（需要关闭 Edge 浏览器）...")
+
+        import subprocess as _sp
+        import os as _os
+        fetch_script = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "_fetch_bili_cookie.py")
+        if not _os.path.exists(fetch_script):
+            if RICH_AVAILABLE:
+                console.print(f"[red]X Cookie 获取脚本不存在: {fetch_script}[/red]")
+            else:
+                print(f"Cookie 获取脚本不存在: {fetch_script}")
+            sys.exit(1)
+
+        try:
+            # 同步调用脚本（脚本会与用户交互，包括让用户关闭 Edge）
+            proc = _sp.run([sys.executable, fetch_script])
+            if proc.returncode != 0:
+                if RICH_AVAILABLE:
+                    console.print(f"[red]X Cookie 获取失败 (exit={proc.returncode})[/red]")
+                else:
+                    print(f"Cookie 获取失败 (exit={proc.returncode})")
+                sys.exit(1)
+
+            # 重新从 cookies.txt 加载 Cookie
+            from utils import load_cookies_from_file
+            config.cookie = load_cookies_from_file("bilibili.com")
+            if config.cookie:
+                if hasattr(engine, '_cookie'):
+                    engine._cookie = config.cookie
+                if RICH_AVAILABLE:
+                    console.print(f"[green]> Cookie 获取成功并已加载 ({len(config.cookie)} 字符)[/green]")
+                else:
+                    print(f"Cookie 获取成功并已加载 ({len(config.cookie)} 字符)")
+            else:
+                if RICH_AVAILABLE:
+                    console.print("[red]X Cookie 获取脚本执行完成，但 cookies.txt 中无 B站 Cookie[/red]")
+                else:
+                    print("Cookie 获取脚本执行完成，但 cookies.txt 中无 B站 Cookie")
+                sys.exit(1)
+        except KeyboardInterrupt:
+            if RICH_AVAILABLE:
+                console.print("\n[yellow]用户中断[/]")
+            else:
+                print("\n用户中断")
+            sys.exit(1)
+
     start_time = datetime.now()
 
     # 检测是否单视频链接

@@ -43,6 +43,9 @@ desktop.ini
 # Chrome CDP Profile (xiaohongshu engine)
 .chrome-profile/
 
+# Edge CDP Profile (bilibili cookie fetch)
+.edge-bili-profile/
+
 # Checkpoint files (xiaohongshu crash recovery)
 output/**/_checkpoint.json
 

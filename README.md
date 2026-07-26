@@ -89,8 +89,14 @@ python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..." --browser-cookie fir
 python svd.py "https://www.douyin.com/video/7539162803471846698"
 python svd.py "https://www.douyin.com/user/MS4wLjAB...?modal_id=7539162803471846698"
 
-# 下载B站用户视频
-python svd.py "https://space.bilibili.com/123456" --browser-cookie firefox
+# 下载B站用户视频（首次会自动调用 _fetch_bili_cookie.py 获取 Cookie）
+python svd.py "https://space.bilibili.com/123456"
+
+# 下载B站单个视频
+python svd.py "https://www.bilibili.com/video/BV1WV3g6eE9z"
+
+# B站 Cookie 获取工具（手动运行，绕过 Edge App-Bound Encryption）
+python _fetch_bili_cookie.py
 
 # 下载小红书用户作品
 python svd.py "https://www.xiaohongshu.com/user/profile/5f..." --browser-cookie firefox
@@ -150,7 +156,22 @@ python svd.py "URL" --browser-cookie edge
 python svd.py "URL" --cookie "your_cookie_string"
 ```
 
-#### 方式四：f2 配置（仅抖音）
+#### 方式四：B站 Cookie 获取工具（B站专用，绕过 App-Bound Encryption）
+
+B站无 Cookie 会触发 412 风控，连免费 1080p 都拿不到。Edge/Chrome v130+ App-Bound Encryption 阻止外部读取 Cookie，常规方式失效。专用工具用 Patchright + CDP 拿明文 Cookie：
+
+```bash
+# 首次运行会打开 Edge/Chrome 窗口让用户登录 B站
+# 后续运行自动复用独立 Profile 的登录态
+python _fetch_bili_cookie.py
+
+# 也可以直接运行 svd.py，检测到 B站且无 Cookie 时会自动调用此工具
+python svd.py "https://space.bilibili.com/123456"
+```
+
+详见 [Cookie 配置指南](docs/cookie-guide.md#b站-cookie-专用获取工具)。
+
+#### 方式五：f2 配置（仅抖音）
 
 编辑 `~/.f2/conf.yaml`，在 `douyin.cookie` 字段填入 Cookie
 
@@ -168,8 +189,9 @@ ShortVideoDownload/
 │   ├── douyin.py       # 抖音引擎 (f2)
 │   ├── kuaishou.py     # 快手引擎 (Web API)
 │   ├── xiaohongshu.py  # 小红书引擎 (Chrome CDP + Patchright)
-│   ├── bilibili.py     # B站引擎 (旧API + yt-dlp)
+│   ├── bilibili.py     # B站引擎 (yt-dlp，投稿+合集+系列)
 │   └── weibo.py        # 微博引擎 (Web API)
+├── _fetch_bili_cookie.py # B站 Cookie 获取工具（绕过 Edge App-Bound Encryption）
 ├── docs/
 │   ├── architecture.md # 架构设计
 │   ├── cookie-guide.md # Cookie 配置指南

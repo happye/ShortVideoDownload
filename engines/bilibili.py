@@ -128,19 +128,24 @@ class BilibiliEngine(BaseEngine):
     def _build_ytdlp_cookie_args(self) -> list:
         """
         构造 yt-dlp 的 Cookie 参数列表
-        优先级：--cookies-from-browser > cookies.txt > 临时文件 > 无
+        优先级：--cookies-from-browser > cookies.txt > 临时文件 > 自动尝试浏览器 > 无
+
+        注意：B站无 Cookie 会触发 412 Precondition Failed 风控，
+        无法获取任何视频格式（包括免费的 1080p）。
         """
-        # 方式1: 从浏览器提取（最可靠）
+        # 方式1: 用户指定的浏览器（--browser-cookie firefox/edge/chrome）
         if self.config.browser_cookie:
             return ["--cookies-from-browser", self.config.browser_cookie]
 
-        # 方式2: 项目根目录的 cookies.txt 文件
+        # 方式2: 项目根目录的 cookies.txt 文件（Netscape 格式）
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         cookie_file_path = os.path.join(project_root, "cookies.txt")
         if os.path.exists(cookie_file_path):
-            return ["--cookies", cookie_file_path]
+            # 检查 cookies.txt 是否包含 B站 Cookie
+            if self._cookies_file_has_bilibili(cookie_file_path):
+                return ["--cookies", cookie_file_path]
 
-        # 方式3: 将 Cookie 字符串写入临时文件
+        # 方式3: 将 Cookie 字符串写入临时文件（--cookie "k=v; k=v"）
         if self._cookie:
             import tempfile
             cookie_file = os.path.join(tempfile.gettempdir(), "svd_bili_cookies.txt")
@@ -153,7 +158,73 @@ class BilibiliEngine(BaseEngine):
                         f.write(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{name.strip()}\t{value.strip()}\n")
             return ["--cookies", cookie_file]
 
+        # 方式4: 自动尝试所有浏览器（yt-dlp 自己处理）
+        # yt-dlp 会依次尝试，失败则跳过；firefox 不受 App-Bound Encryption 影响
+        for browser in ("firefox", "edge", "chrome"):
+            try:
+                # 用 yt-dlp 快速验证浏览器是否能提取 B站 Cookie
+                if self._browser_has_bilibili_cookie(browser):
+                    return ["--cookies-from-browser", browser]
+            except Exception:
+                continue
+
         return []
+
+    @staticmethod
+    def _cookies_file_has_bilibili(cookie_file_path: str) -> bool:
+        """检查 cookies.txt 文件是否包含 B站 Cookie"""
+        try:
+            with open(cookie_file_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if 'bilibili.com' in line.lower() and not line.startswith('#'):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _browser_has_bilibili_cookie(browser: str) -> bool:
+        """用 rookiepy 快速检测浏览器是否登录了 B站（不抛异常）"""
+        try:
+            import rookiepy
+            func_map = {
+                "firefox": rookiepy.firefox,
+                "chrome": rookiepy.chrome,
+                "edge": rookiepy.edge,
+            }
+            func = func_map.get(browser.lower())
+            if not func:
+                return False
+            cookies = func(domains=[".bilibili.com"])
+            # 至少要有 SESSDATA 才算登录
+            return any(c.get("name") == "SESSDATA" for c in cookies)
+        except Exception:
+            # Edge/Chrome v130+ App-Bound Encryption 会抛异常
+            return False
+
+    @staticmethod
+    def _format_no_cookie_error(action: str) -> str:
+        """生成无 Cookie 错误提示（含解决方案）
+
+        B站无 Cookie 会触发 412 Precondition Failed 风控，
+        连免费的 1080p 都拿不到。必须提供 Cookie 才能下载任何画质。
+        """
+        return (
+            f"B站{action}失败：HTTP 412 Precondition Failed（无 Cookie 风控）\n\n"
+            f"原因：B站要求登录 Cookie 才能访问视频格式列表，没 Cookie 连免费的 1080p 都拿不到。\n"
+            f"注意：1080p 不需要大会员，但必须登录（普通账号即可）。\n\n"
+            f"解决方案（任选其一）：\n"
+            f"  1. 运行专用 Cookie 获取工具（推荐，自动绕过 Edge 加密）：\n"
+            f"       python _fetch_bili_cookie.py\n"
+            f"     该工具会启动 Edge 让你确认登录态，自动提取 Cookie 保存到 cookies.txt\n\n"
+            f"  2. 从 Firefox 提取 Cookie（如果 Firefox 已登录 B站）：\n"
+            f"       python svd.py \"URL\" --browser-cookie firefox\n\n"
+            f"  3. 手动导出 cookies.txt：\n"
+            f"     在浏览器装 \"Get cookies.txt LOCALLY\" 扩展，导出后放到项目根目录\n\n"
+            f"  4. 手动提供 Cookie 字符串：\n"
+            f"     F12 → Network → 刷新页面 → 找请求 → 复制 Cookie 头 →\n"
+            f"       python svd.py \"URL\" --cookie \"复制的值\""
+        )
 
     async def fetch_user_items(self, user_url: str) -> List[DownloadItem]:
         """
@@ -198,10 +269,13 @@ class BilibiliEngine(BaseEngine):
 
         if proc.returncode != 0:
             err = stderr.decode("utf-8", errors="replace")[:500]
+            # 检测 412 风控（无 Cookie 时 B站直接拒绝）
+            if "412" in err or "Precondition Failed" in err:
+                raise RuntimeError(self._format_no_cookie_error("列出视频"))
             raise RuntimeError(
                 f"yt-dlp 列出视频失败 (exit={proc.returncode}): {err}\n\n"
                 f"如果提示需要登录，请提供 Cookie：\n"
-                f"  --cookie \"your_cookie\" 或 --browser-cookie chrome"
+                f"  --cookie \"your_cookie\" 或 --browser-cookie firefox"
             )
 
         # 解析 BV 号（yt-dlp --flat-playlist -O "%(id)s" 每行输出一个 ID）
@@ -215,7 +289,7 @@ class BilibiliEngine(BaseEngine):
         if not bvids:
             raise RuntimeError(
                 "未找到任何视频，可能用户没有投稿或需要 Cookie。\n"
-                "建议提供 Cookie：--browser-cookie chrome 或 cookies.txt 文件。"
+                "建议提供 Cookie：--browser-cookie firefox 或 cookies.txt 文件。"
             )
 
         # 调一次 view API 拿 UP 主昵称（用于按昵称创建目录）
@@ -316,7 +390,13 @@ class BilibiliEngine(BaseEngine):
             if saved_paths:
                 return DownloadResult(True, item, saved_paths=saved_paths)
             else:
-                err = stderr.decode("utf-8", errors="replace")[:500]
+                # yt-dlp 的 WARNING（如 cookie 解析）在 stderr 前部，
+                # 真正的 ERROR 在末尾。从末尾截 1500 字符避免 WARNING 淹没关键错误。
+                err_full = stderr.decode("utf-8", errors="replace")
+                err = err_full[-1500:] if len(err_full) > 1500 else err_full
+                # 检测 412 风控（无 Cookie 时 B站直接拒绝）
+                if "412" in err_full or "Precondition Failed" in err_full:
+                    return DownloadResult(False, item, error=self._format_no_cookie_error("下载视频"))
                 return DownloadResult(False, item, error=err)
 
         except FileNotFoundError:

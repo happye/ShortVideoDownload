@@ -447,8 +447,10 @@ def load_cookies_from_file(domain: str) -> str:
     从项目根目录的 cookies.txt 文件加载指定域名的 Cookie
     cookies.txt 使用 Netscape 格式（与 yt-dlp 兼容）
 
+    自动尝试备用域名（如 bilibili.cn / bilibili.tv 也作为 B站 Cookie）
+
     Args:
-        domain: 目标域名
+        domain: 目标域名（主域名，如 bilibili.com）
 
     Returns:
         Cookie 字符串，如果文件不存在或无匹配则返回空字符串
@@ -460,12 +462,27 @@ def load_cookies_from_file(domain: str) -> str:
     if not os.path.exists(cookie_file):
         return ""
 
+    # 尝试主域名
     cookie_str = _parse_netscape_cookie_file(cookie_file, domain)
-    return cookie_str
+    if cookie_str:
+        return cookie_str
+
+    # 尝试备用域名（如 .bilibili.cn 也是 B站的）
+    domain_alt_map = {
+        "bilibili.com": ["bilibili.cn", "bilibili.tv"],
+        "weibo.com": ["weibo.cn"],
+    }
+    alts = domain_alt_map.get(domain, [])
+    for alt in alts:
+        alt_cookie = _parse_netscape_cookie_file(cookie_file, alt)
+        if alt_cookie:
+            return alt_cookie
+
+    return ""
 
 
 def get_domain_for_platform(platform: str) -> str:
-    """获取平台对应的域名（用于Cookie提取）"""
+    """获取平台对应的主域名（用于Cookie提取）"""
     domain_map = {
         "douyin": "douyin.com",
         "kuaishou": "kuaishou.com",
@@ -474,6 +491,15 @@ def get_domain_for_platform(platform: str) -> str:
         "weibo": "weibo.com",
     }
     return domain_map.get(platform, "")
+
+
+def get_alt_domains_for_platform(platform: str) -> list:
+    """获取平台的备用域名列表（用于 cookies.txt 解析时的额外匹配）"""
+    alt_map = {
+        "bilibili": ["bilibili.cn", "bilibili.tv"],
+        "weibo": ["weibo.cn"],
+    }
+    return alt_map.get(platform, [])
 
 
 def suppress_f2_logging():
