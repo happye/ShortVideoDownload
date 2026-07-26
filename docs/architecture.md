@@ -85,7 +85,11 @@ cookies.txt 文件（Netscape 格式，按域名筛选）
 ## 去重机制
 
 1. `download_user()` 启动时调用 `_scan_existing_items(save_dir)` 扫描目录
-2. 从文件名中提取 item_id（≥10位纯数字后缀）
+2. 从文件名最后一段提取 item_id，支持四种格式：
+   - 抖音 item_id：≥10 位纯数字
+   - 小红书 note_id：24 位十六进制字符串
+   - B站 BV号：`BV[A-Za-z0-9]{10}`（如 BV1WV3g6eE9z）
+   - B站 av号：`av\d+`（如 av123456）
 3. 遍历作品列表时，item_id 在已有集合中 → 跳过
 4. `download_item()` 中也检查目标文件是否存在 → 已存在则跳过
 5. 文件名格式：`主标题_标签1_标签2_itemId.mp4`，确保同一作品不会因标题相同而混淆
@@ -189,9 +193,14 @@ output/
 - 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA）
 
 ### B站
-- 使用 wbi API `x/space/wbi/arc/search`（需要 wbi 签名）
-- 旧 API `x/space/arc/search` 不需要 wbi 签名但已限速
-- -799 频率限制：3次重试，指数退避
+- 完全基于 yt-dlp（不再自调B站 API）：旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` 已废弃返回 404；新 API 需要 wbi 签名且风控严格（-799 / 412）。yt-dlp 内部维护 API 路径和签名，最稳定
+- `fetch_user_items`：用 `yt-dlp --flat-playlist -O "%(id)s"` 列出用户所有视频，**自动处理投稿/合集/系列/子合集**，保证视频列表完整
+- `download_item`：用 yt-dlp `-o "%(title)s_%(id)s.%(ext)s"` 模板命名文件（真实标题+BV号后缀），`--print after_move:filepath` 获取实际保存路径
+- 标题占位：flat-playlist 拿不到标题，`item.title` 用 BV 号占位；下载时 yt-dlp 用真实标题命名文件
+- UP 主昵称：调一次 `view` API 拿第一个视频的 `owner.name`（失败时目录名 "unknown"）
+- URL 兼容性：`_extract_uid` 用 `space\.bilibili\.com/(\d+)` 提取 UID，支持所有 space 子路径（主页、`/upload/video`、`/dynamic`、`/channel/collectionDetail?sid=xxx`、`/channel/seriesDetail?sid=xxx`）
+- Cookie 优先级：`--cookies-from-browser` > 项目根 `cookies.txt` > 临时文件（从 `--cookie` 字符串生成）
+- 单视频下载：`fetch_single_item` 调用 `view` API 拿标题/UP主，失败退化为 video_id 作标题
 
 ### 微博
 - Web API 获取用户作品列表

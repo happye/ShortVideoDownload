@@ -157,26 +157,11 @@
 
 ---
 
-## 问题 #4: B站引擎 API 返回 -403 访问权限不足
+## 问题 #4: B站引擎 API 返回 -403 访问权限不足（已过时）
 
-**状态**: 需要有效Cookie（非代码问题）⚠️
+**状态**: 已过时（2026-07-26）✅
 
-**描述**: B站 wbi API 在没有有效登录 Cookie 时返回 `-403` 或 `-352` 错误。wbi 签名逻辑本身正确，但需要有效的 SESSDATA 等 Cookie 才能通过风控。
-
-**根因**: B站 API 风控要求登录态，过期的 Cookie 无法通过验证。
-
-**测试结果**:
-- 无Cookie: wbi API 返回 `-352`（风控校验失败）
-- cookies.txt（参考项目的过期Cookie）: nav API 返回 `isLogin: False`，搜索API返回 `-352`
-- yt-dlp + cookies.txt: 单个视频下载正常（yt-dlp不需要登录态即可下载公开视频）
-
-**解决方案**:
-- 用户需要提供有效的 B站登录 Cookie
-- 推荐使用 `cookies.txt` 文件方式
-- B站视频下载（yt-dlp部分）在有 Cookie 时工作正常
-
-**修改文件**:
-- `engines/bilibili.py`: 改进 Cookie 传递优先级（cookies-from-browser > cookies.txt > 临时文件）
+**说明**: B站引擎已改为完全基于 yt-dlp（不再调用 wbi API），此问题自动消失。旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` API 已废弃返回 404，新 API 需 wbi 签名且风控严格。yt-dlp 内部维护 API 路径和签名，最稳定。
 
 ---
 

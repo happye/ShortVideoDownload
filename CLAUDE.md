@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-短视频平台用户作品批量下载工具。双引擎架构：抖音用 f2 库，其他平台用 yt-dlp + 自研 API。
+短视频平台用户作品批量下载工具。三套引擎：抖音用 f2 库，小红书用 Chrome CDP + Patchright，B站纯 yt-dlp，快手/微博用自研 API + yt-dlp。
 
 ## 关键规则
 
@@ -42,6 +42,16 @@
 - `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 + B站 2 种 URL 格式（`/video/BVxxx`、`/video/avxxx`）
 - 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`；小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；B站调用 `view` API 拿标题/UP主（失败退化为 video_id 作标题，yt-dlp 仍可下载）；快手/微博未实现 `fetch_single_item`，不支持单视频下载
 - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
+
+### B站引擎（完全基于 yt-dlp）
+- **不再自调B站 API**：旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` 已废弃返回 404；新 API 需要 wbi 签名且风控严格（频繁 -799 / 412）。yt-dlp 内部维护 API 路径和签名，跟着升级，最稳定
+- **`fetch_user_items`**：用 `yt-dlp --flat-playlist -O "%(id)s"` 列出用户所有视频，**自动处理投稿/合集/系列/子合集**，保证视频列表完整
+- **标题占位**：flat-playlist 模式拿不到标题，`item.title` 用 BV 号占位；下载时 yt-dlp 用真实标题命名文件
+- **UP 主昵称**：调一次 `view` API 拿第一个视频的 `owner.name`，用于按昵称创建目录（失败时目录名 "unknown"）
+- **`download_item`**：用 yt-dlp `-o "%(title)s_%(id)s.%(ext)s"` 模板命名文件（真实标题+BV号后缀），`--print after_move:filepath` 获取实际保存路径
+- **去重**：`_scan_existing_items` 识别文件名中的 BV 号（`BV[A-Za-z0-9]{10}`）和 av 号（`av\d+`）
+- **URL 兼容性**：`_extract_uid` 用 `space\.bilibili\.com/(\d+)` 提取 UID，支持所有 space 子路径（主页、`/upload/video`、`/dynamic`、`/channel/collectionDetail?sid=xxx`、`/channel/seriesDetail?sid=xxx` 等），yt-dlp 自动按 URL 类型列出对应视频
+- **Cookie 优先级**：`--cookies-from-browser` > 项目根 `cookies.txt` > 临时文件（从 `--cookie` 字符串生成）
 
 ### 抖音视频URL回退
 - f2 的 `video_play_addr` 只映射 `bit_rate[0].play_addr.url_list`，部分视频 `bit_rate` 为空
@@ -91,7 +101,7 @@
 
 ### 去重机制
 - `_scan_existing_items()` 扫描目录，从文件名提取 item_id
-- 抖音 item_id：≥10 位纯数字；小红书 note_id：24 位十六进制字符串
+- 抖音 item_id：≥10 位纯数字；小红书 note_id：24 位十六进制；B站 BV号 `BV[A-Za-z0-9]{10}` / av号 `av\d+`
 - `download_item()` 检查目标文件是否已存在
 - 已存在 → 返回 `skipped=True`，不下载不重命名
 
@@ -133,5 +143,5 @@ python fix_names.py "用户URL" "output/douyin/用户目录"
 | 抖音 | f2 | 可用（需 Cookie） |
 | 快手 | Web API | 需 web_st Cookie |
 | 小红书 | Chrome CDP+Patchright | 需有效 Cookie |
-| B站 | wbi API+yt-dlp | 需有效 Cookie |
+| B站 | yt-dlp（投稿+合集+系列） | 需有效 Cookie |
 | 微博 | Web API | 需有效 Cookie |

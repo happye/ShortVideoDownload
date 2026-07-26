@@ -179,8 +179,8 @@ def detect_single_video(url: str) -> tuple:
         if m:
             return ("xiaohongshu", m.group(1))
     elif platform == "bilibili":
-        # 1. /video/BVxxxxxxxxxx （BV号，B站主推格式）
-        m = re.search(r'bilibili\.com/video/(BV[A-Za-z0-9]+)', url)
+        # 1. /video/BVxxxxxxxxxx （BV号，B站主推格式：BV + 10 位字母数字）
+        m = re.search(r'bilibili\.com/video/(BV[A-Za-z0-9]{10})', url)
         if m:
             return ("bilibili", m.group(1))
         # 2. /video/av123456 （av号旧格式，保留 av 前缀以区分 BV 号）

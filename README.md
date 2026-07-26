@@ -22,10 +22,10 @@
 | 抖音 | 视频 + 图集 | f2 | 必需 | ✅ 支持 |
 | 快手 | 视频 + 图集 | Web API | 必需 | ❌ 不支持 |
 | 小红书 | 视频 + 图集 | Chrome CDP + Patchright + aiohttp | 必需 | ✅ 支持 |
-| B站 | 视频 | B站 wbi API + yt-dlp | 必需 | ❌ 不支持 |
+| B站 | 视频 | yt-dlp（投稿+合集+系列） | 必需 | ✅ 支持 |
 | 微博 | 视频 + 图集 | 微博 Web API | 必需 | ❌ 不支持 |
 
-> **单视频下载说明**：仅抖音和小红书支持直接下载单个视频/图集链接。抖音支持 `/video/{id}`、`/note/{id}`、`?modal_id=`、`iesdouyin.com/share/video/{id}` 四种格式；小红书支持 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}` 三种格式（可带 `?xsec_token=` 参数）。
+> **单视频下载说明**：抖音、小红书、B站支持直接下载单个视频链接。抖音支持 `/video/{id}`、`/note/{id}`、`?modal_id=`、`iesdouyin.com/share/video/{id}` 四种格式；小红书支持 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}` 三种格式（可带 `?xsec_token=` 参数）；B站支持 `/video/BVxxx`、`/video/avxxx` 两种格式。
 
 > **重要**：所有平台目前都需要登录 Cookie 才能获取用户作品列表。这是各平台的风控策略，不是工具限制。
 

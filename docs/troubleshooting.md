@@ -54,24 +54,20 @@
 
 ---
 
-### B站 -799 频率限制
+### B站 yt-dlp 列出视频失败 / 下载超时
 
-**现象**：API 返回 `code=-799, message=请求过于频繁`
+**现象**：`yt-dlp 列出视频失败`、`未找到任何视频`、或下载超时
 
-**解决**：
-1. 等待一段时间后重试（通常几小时）
-2. 程序已内置 3 次重试机制（指数退避 5s→10s→20s）
-3. 减少并发请求数
-
----
-
-### B站 -403 访问权限不足
-
-**原因**：Cookie 无效或过期
+**原因**：
+1. Cookie 无效或过期（部分用户视频需要登录）
+2. 网络问题或被风控
+3. 未安装 yt-dlp（错误提示"未找到 yt-dlp 命令"）
 
 **解决**：
-1. 重新导出 cookies.txt
-2. 确认 B站 `SESSDATA` Cookie 有效
+1. 重新导出 cookies.txt，确认 B站 `SESSDATA` Cookie 有效
+2. 尝试 `--browser-cookie chrome` 从浏览器提取 Cookie
+3. 安装 yt-dlp：`pip install yt-dlp`
+4. 减少下载数量：`python svd.py "URL" -n 10`
 
 ---
 

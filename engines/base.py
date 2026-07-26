@@ -184,8 +184,16 @@ class BaseEngine(ABC):
             # 尝试提取最后一段作为 item_id
             parts = name_without_ext.split('_')
             for part in reversed(parts):
-                # 抖音/B站的 item_id 通常是纯数字且较长
-                # 小红书的 note_id 是 24 位十六进制字符串
+                # 抖音 item_id: ≥10 位纯数字
+                # 小红书 note_id: 24 位十六进制字符串
+                # B站 BV号: BV + 10 位字母数字 (如 BV1WV3g6eE9z)
+                # B站 av号: av + 数字 (如 av123456)
+                if re.match(r'^BV[A-Za-z0-9]{10}$', part):
+                    existing.add(part)
+                    break
+                if re.match(r'^av\d+$', part):
+                    existing.add(part)
+                    break
                 if len(part) >= 10 and (part.isdigit() or re.match(r'^[0-9a-f]{20,}$', part)):
                     existing.add(part)
                     break

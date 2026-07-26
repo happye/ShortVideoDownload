@@ -1,39 +1,34 @@
 """
 ShortVideoDownload - B站下载引擎
-使用B站 API 获取用户视频列表，yt-dlp 下载单个视频
+完全基于 yt-dlp：
+- fetch_user_items: yt-dlp --flat-playlist 列出用户所有视频（自动处理投稿/合集/系列/子合集）
+- download_item: yt-dlp 下载并用 %(title)s_%(id)s.%(ext)s 模板命名
+- fetch_single_item: 调 view API 拿标题/UP主，yt-dlp 下载
+
+设计理由：B站旧 API（x/space/arc/search、x/polymer/space/seasons_series_list）已废弃返回 404，
+新 API 需要 wbi 签名且风控严格；yt-dlp 内部维护 API 路径和签名，跟着升级，且能自动列出
+投稿+合集+系列的全部视频，最稳定完整。
 """
 import os
 import re
-import json
 import asyncio
-import hashlib
 from typing import List, Optional
-from datetime import datetime
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig
 
 
 class BilibiliEngine(BaseEngine):
-    """B站下载引擎 - API + yt-dlp"""
+    """B站下载引擎 - 完全基于 yt-dlp"""
 
     platform = "bilibili"
-
-    # wbi 签名相关
-    MIXIN_KEY_ENC_TAB = [
-        46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
-        27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 16,
-        20, 36, 34, 17, 6, 22, 48, 44, 40, 21, 25, 13, 4, 52, 37, 26,
-        55, 1, 24, 51, 7, 56, 57, 30, 11, 0, 54, 59, 62, 61, 60, 63,
-    ]
 
     def __init__(self, config: DownloadConfig):
         super().__init__(config)
         self._cookie = config.cookie or ""
-        self._wbi_keys = None  # 缓存的 img_key + sub_key
 
     def _extract_uid(self, url: str) -> str:
-        """从 URL 提取B站 UID"""
+        """从 URL 提取B站 UID（支持所有 space.bilibili.com 子路径）"""
         match = re.search(r'space\.bilibili\.com/(\d+)', url)
         if match:
             return match.group(1)
@@ -121,7 +116,7 @@ class BilibiliEngine(BaseEngine):
         )
 
     def _build_headers(self) -> dict:
-        """构建请求头"""
+        """构建请求头（用于 view API）"""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "Referer": "https://www.bilibili.com/",
@@ -130,213 +125,143 @@ class BilibiliEngine(BaseEngine):
             headers["Cookie"] = self._cookie
         return headers
 
-    @staticmethod
-    def _get_mixin_key(raw_key: str) -> str:
-        """生成 wbi mixin key"""
-        return "".join(raw_key[i] for i in BilibiliEngine.MIXIN_KEY_ENC_TAB)[:32]
+    def _build_ytdlp_cookie_args(self) -> list:
+        """
+        构造 yt-dlp 的 Cookie 参数列表
+        优先级：--cookies-from-browser > cookies.txt > 临时文件 > 无
+        """
+        # 方式1: 从浏览器提取（最可靠）
+        if self.config.browser_cookie:
+            return ["--cookies-from-browser", self.config.browser_cookie]
 
-    def _sign_wbi(self, params: dict) -> dict:
-        """对参数进行 wbi 签名"""
-        if not self._wbi_keys:
-            return params
+        # 方式2: 项目根目录的 cookies.txt 文件
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cookie_file_path = os.path.join(project_root, "cookies.txt")
+        if os.path.exists(cookie_file_path):
+            return ["--cookies", cookie_file_path]
 
-        img_key, sub_key = self._wbi_keys
-        mixin_key = self._get_mixin_key(img_key + sub_key)
+        # 方式3: 将 Cookie 字符串写入临时文件
+        if self._cookie:
+            import tempfile
+            cookie_file = os.path.join(tempfile.gettempdir(), "svd_bili_cookies.txt")
+            with open(cookie_file, 'w', encoding='utf-8') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                for part in self._cookie.split(';'):
+                    part = part.strip()
+                    if '=' in part:
+                        name, value = part.split('=', 1)
+                        f.write(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{name.strip()}\t{value.strip()}\n")
+            return ["--cookies", cookie_file]
 
-        # 添加 wts
-        params["wts"] = int(datetime.now().timestamp())
-
-        # 按 key 排序
-        params = dict(sorted(params.items()))
-
-        # 过滤非法字符
-        query = "&".join(
-            f"{k}={v}" for k, v in params.items()
-            if all(c not in str(v) for c in "!'()*")
-        )
-
-        # 计算 w_rid
-        w_rid = hashlib.md5((query + mixin_key).encode()).hexdigest()
-        params["w_rid"] = w_rid
-
-        return params
-
-    async def _fetch_wbi_keys(self, session) -> None:
-        """获取 wbi 签名所需的 key"""
-        if self._wbi_keys:
-            return
-
-        import aiohttp
-
-        # 获取 nav API 中的 img_url 和 sub_url
-        nav_url = "https://api.bilibili.com/x/web-interface/nav"
-        headers = self._build_headers()
-
-        try:
-            async with session.get(nav_url, headers=headers) as resp:
-                if resp.status == 412:
-                    raise RuntimeError(
-                        "B站 API 返回 412 (请求被拦截)，需要提供 Cookie。\n"
-                        "请使用 --cookie 或 --browser-cookie 参数提供 Cookie。"
-                    )
-                data = await resp.json()
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(
-                f"获取B站 wbi 签名密钥失败: {e}\n"
-                f"可能需要提供 Cookie，请使用 --cookie 或 --browser-cookie 参数。"
-            )
-
-        wbi_img = data.get("data", {}).get("wbi_img", {})
-        img_url = wbi_img.get("img_url", "")
-        sub_url = wbi_img.get("sub_url", "")
-
-        if img_url and sub_url:
-            # 提取 key（文件名不含扩展名）
-            self._wbi_keys = (
-                img_url.rsplit("/", 1)[-1].split(".")[0],
-                sub_url.rsplit("/", 1)[-1].split(".")[0],
-            )
+        return []
 
     async def fetch_user_items(self, user_url: str) -> List[DownloadItem]:
-        """获取B站用户的所有视频"""
-        import aiohttp
-
+        """
+        获取B站用户的所有视频列表（用 yt-dlp --flat-playlist）
+        - yt-dlp 自动处理投稿/合集/系列/子合集，保证视频列表完整
+        - 支持的 URL：space.bilibili.com/{uid}、/{uid}/upload/video、/{uid}/channel/collectionDetail?sid=xxx 等
+        - 标题用 BV 号占位，下载时 yt-dlp 用真实标题命名文件
+        - 调一次 view API 拿 UP 主昵称（用于目录命名）
+        """
         uid = self._extract_uid(user_url)
-        headers = self._build_headers()
-        # 使用更具体的 Referer，有助于通过风控
-        headers["Referer"] = f"https://space.bilibili.com/{uid}/"
-        items = []
-        pn = 1  # 页码
 
-        async with aiohttp.ClientSession() as session:
-            while True:
-                # 优先使用旧API端点（不需要wbi签名，更稳定）
-                # 如果旧API失败，再尝试wbi签名API
-                api_url = "https://api.bilibili.com/x/space/arc/search"
-                params = {
-                    "mid": uid,
-                    "pn": str(pn),
-                    "ps": "30",
-                    "order": "pubdate",
-                }
+        # 构造 yt-dlp 命令
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--no-progress",
+            "--no-warnings",
+            "-O", "%(id)s",
+        ]
+        cmd.extend(self._build_ytdlp_cookie_args())
+        if self.config.proxies:
+            cmd.extend(["--proxy", self.config.proxies])
+        cmd.append(user_url)
 
-                try:
-                    async with session.get(
-                        api_url, params=params, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
+        # 调用 yt-dlp 列出所有视频
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "未找到 yt-dlp 命令，请先安装：pip install yt-dlp"
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "yt-dlp 列出视频超时（180s），可能网络问题或被风控。\n"
+                "建议提供 Cookie：--browser-cookie chrome 或 cookies.txt 文件。"
+            )
+
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(
+                f"yt-dlp 列出视频失败 (exit={proc.returncode}): {err}\n\n"
+                f"如果提示需要登录，请提供 Cookie：\n"
+                f"  --cookie \"your_cookie\" 或 --browser-cookie chrome"
+            )
+
+        # 解析 BV 号（yt-dlp --flat-playlist -O "%(id)s" 每行输出一个 ID）
+        bvids = []
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            # B站视频 ID 格式：BV + 10 位字母数字（如 BV1WV3g6eE9z）
+            if re.match(r'^BV[A-Za-z0-9]{10}$', line):
+                bvids.append(line)
+
+        if not bvids:
+            raise RuntimeError(
+                "未找到任何视频，可能用户没有投稿或需要 Cookie。\n"
+                "建议提供 Cookie：--browser-cookie chrome 或 cookies.txt 文件。"
+            )
+
+        # 调一次 view API 拿 UP 主昵称（用于按昵称创建目录）
+        nickname = None
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.bilibili.com/x/web-interface/view",
+                    params={"bvid": bvids[0]},
+                    headers=self._build_headers(),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
                         data = await resp.json()
-                except Exception as e:
-                    if not items:
-                        raise RuntimeError(
-                            f"B站 API 请求失败: {e}\n\n"
-                            f"如果持续失败，请尝试提供 Cookie：\n"
-                            f"  --cookie \"your_cookie\" 或 --browser-cookie chrome"
-                        )
-                    break
+                        if data.get("code") == 0:
+                            owner = (data.get("data") or {}).get("owner") or {}
+                            nickname = owner.get("name") or None
+        except Exception:
+            pass  # 失败时目录用 "unknown"
 
-                code = data.get("code", -1)
-                # -799: 请求过于频繁，等待后重试
-                if code == -799:
-                    import asyncio as _asyncio
-                    wait_time = 5
-                    for retry in range(3):
-                        await _asyncio.sleep(wait_time)
-                        try:
-                            async with session.get(
-                                api_url, params=params, headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=15),
-                            ) as resp:
-                                data = await resp.json()
-                                code = data.get("code", -1)
-                                if code != -799:
-                                    break
-                                wait_time *= 2
-                        except Exception:
-                            break
+        # 构造 DownloadItem 列表
+        items = []
+        for bvid in bvids:
+            items.append(DownloadItem(
+                item_id=bvid,
+                item_type="video",
+                title=bvid,  # 占位，下载时 yt-dlp 用真实标题命名文件
+                urls=[f"https://www.bilibili.com/video/{bvid}"],
+                nickname=nickname,
+                uid=uid,
+            ))
 
-                code = data.get("code", -1)
-                if code != 0:
-                    msg = data.get("message", "未知错误")
-                    # 旧API失败时，尝试wbi签名API
-                    if code in (-352, -403) and not self._wbi_keys:
-                        try:
-                            await self._fetch_wbi_keys(session)
-                            if self._wbi_keys:
-                                # 用wbi签名重试
-                                wbi_url = "https://api.bilibili.com/x/space/wbi/arc/search"
-                                wbi_params = self._sign_wbi(params.copy())
-                                async with session.get(
-                                    wbi_url, params=wbi_params, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=15),
-                                ) as resp2:
-                                    data = await resp2.json()
-                                    code = data.get("code", -1)
-                        except Exception:
-                            pass  # wbi也失败，继续用原始错误
-
-                    if code != 0:
-                        if not items:
-                            if code == -352:
-                                raise RuntimeError(
-                                    "B站 API 风控校验失败，需要提供登录 Cookie。\n"
-                                    "请使用 --cookie 或 --browser-cookie 参数提供 Cookie。\n\n"
-                                    "获取Cookie方法：\n"
-                                    "  1. 在浏览器登录 bilibili.com\n"
-                                    "  2. 使用浏览器扩展导出 cookies.txt 文件放到项目根目录\n"
-                                    "  3. 或使用 --cookie 参数手动提供 Cookie"
-                                )
-                            raise RuntimeError(
-                                f"B站 API 返回错误 (code={code}): {msg}\n\n"
-                                f"如果提示需要登录，请提供 Cookie：\n"
-                                f"  --cookie \"your_cookie\" 或 --browser-cookie chrome"
-                            )
-                        break
-
-                vlist = data.get("data", {}).get("list", {}).get("vlist", [])
-                if not vlist:
-                    break
-
-                for video in vlist:
-                    bvid = video.get("bvid", "")
-                    aid = video.get("aid", "")
-                    title = video.get("title", "") or "untitled"
-                    description = video.get("description", "")
-                    created = video.get("created", 0)
-                    pic = video.get("pic", "")
-
-                    # 构建视频 URL
-                    video_url = f"https://www.bilibili.com/video/{bvid}" if bvid else ""
-
-                    item = DownloadItem(
-                        item_id=bvid or str(aid),
-                        item_type="video",
-                        title=title,
-                        urls=[video_url],
-                        create_time=str(created),
-                        cover_url=pic,
-                        description=description,
-                    )
-                    items.append(item)
-
-                # 翻页
-                page_info = data.get("data", {}).get("page", {})
-                total = page_info.get("count", 0)
-                if pn * 30 >= total:
-                    break
-                pn += 1
-
-                # 数量限制
-                if self.config.max_count > 0 and len(items) >= self.config.max_count:
-                    items = items[:self.config.max_count]
-                    break
+        # 数量限制
+        if self.config.max_count > 0:
+            items = items[:self.config.max_count]
 
         return items
 
     async def download_item(self, item: DownloadItem, save_dir: str) -> DownloadResult:
-        """下载单个B站视频（通过 yt-dlp）"""
+        """
+        下载单个B站视频（通过 yt-dlp）
+        - 文件命名用 yt-dlp 模板 %(title)s_%(id)s.%(ext)s（含 BV 号用于去重）
+        - yt-dlp 自己获取真实标题，无需预先调 view API
+        - 用 --print after_move:filepath 获取实际保存路径
+        """
         try:
             video_url = item.urls[0] if item.urls else ""
             if not video_url:
@@ -349,47 +274,22 @@ class BilibiliEngine(BaseEngine):
             }
             fmt = quality_map.get(self.config.quality, "bestvideo+bestaudio/best")
 
-            filepath = self._make_filepath(save_dir, item, ".mp4")
+            # 用 yt-dlp 模板命名：真实标题_BV号.mp4
+            # yt-dlp 获取真实标题，BV 号后缀用于扫描去重
+            output_template = os.path.join(save_dir, "%(title)s_%(id)s.%(ext)s")
 
             cmd = [
                 "yt-dlp",
                 "-f", fmt,
                 "--merge-output-format", "mp4",
-                "-o", filepath,
+                "-o", output_template,
+                "--print", "after_move:filepath",  # 输出最终文件路径
+                "--no-progress",
                 "--no-warnings",
                 "--retries", str(self.config.max_retries),
                 "--socket-timeout", str(self.config.timeout),
             ]
-
-            # Cookie（优先级：cookies-from-browser > cookies.txt > 临时文件）
-            cookie_added = False
-
-            # 方式1: 直接让 yt-dlp 从浏览器提取（最可靠）
-            if self.config.browser_cookie:
-                cmd.extend(["--cookies-from-browser", self.config.browser_cookie])
-                cookie_added = True
-
-            # 方式2: 使用项目根目录的 cookies.txt 文件
-            if not cookie_added:
-                from utils import load_cookies_from_file
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                cookie_file_path = os.path.join(project_root, "cookies.txt")
-                if os.path.exists(cookie_file_path):
-                    cmd.extend(["--cookies", cookie_file_path])
-                    cookie_added = True
-
-            # 方式3: 将 Cookie 字符串写入临时文件
-            if not cookie_added and self._cookie:
-                import tempfile
-                cookie_file = os.path.join(tempfile.gettempdir(), "svd_bili_cookies.txt")
-                with open(cookie_file, 'w', encoding='utf-8') as f:
-                    f.write("# Netscape HTTP Cookie File\n")
-                    for part in self._cookie.split(';'):
-                        part = part.strip()
-                        if '=' in part:
-                            name, value = part.split('=', 1)
-                            f.write(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{name.strip()}\t{value.strip()}\n")
-                cmd.extend(["--cookies", cookie_file])
+            cmd.extend(self._build_ytdlp_cookie_args())
 
             if self.config.proxies:
                 cmd.extend(["--proxy", self.config.proxies])
@@ -402,19 +302,25 @@ class BilibiliEngine(BaseEngine):
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self.config.timeout * 20
+                proc.communicate(), timeout=self.config.timeout * 30
             )
 
             saved_paths = []
-            if proc.returncode == 0 and os.path.exists(filepath):
-                saved_paths.append(filepath)
+            if proc.returncode == 0:
+                # 从 stdout 解析 yt-dlp 输出的实际文件路径
+                for line in stdout.decode("utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if line and os.path.exists(line):
+                        saved_paths.append(line)
 
             if saved_paths:
                 return DownloadResult(True, item, saved_paths=saved_paths)
             else:
-                err = stderr.decode("utf-8", errors="replace")[:300]
+                err = stderr.decode("utf-8", errors="replace")[:500]
                 return DownloadResult(False, item, error=err)
 
+        except FileNotFoundError:
+            return DownloadResult(False, item, error="未找到 yt-dlp 命令，请先安装：pip install yt-dlp")
         except asyncio.TimeoutError:
             return DownloadResult(False, item, error="下载超时")
         except Exception as e:
