@@ -39,6 +39,87 @@ class BilibiliEngine(BaseEngine):
             return match.group(1)
         raise ValueError(f"无法从 URL 提取B站 UID: {url}")
 
+    @staticmethod
+    def _normalize_bvid(video_id: str) -> tuple:
+        """
+        规范化 video_id，返回 (api_param_key, api_param_value, video_url)
+        - BV号: ('bvid', 'BVxxxx', 'https://www.bilibili.com/video/BVxxxx')
+        - av号: ('aid', '123456',  'https://www.bilibili.com/video/av123456')
+        """
+        vid = video_id.strip()
+        if vid.lower().startswith("av") and vid[2:].isdigit():
+            aid = vid[2:]
+            return ("aid", aid, f"https://www.bilibili.com/video/av{aid}")
+        # 默认按 BV 号处理
+        return ("bvid", vid, f"https://www.bilibili.com/video/{vid}")
+
+    async def fetch_single_item(self, video_id: str, original_url: str = None) -> Optional[DownloadItem]:
+        """
+        获取单个B站视频信息（用于单视频 URL 下载）
+        Args:
+            video_id: BVID (BVxxxx) 或 AVID (av123456)
+            original_url: 原始 URL（含 spm_id_from 等参数，优先作为下载源）
+        Returns:
+            DownloadItem，标题来自 view API；API 失败时退化为 video_id 作标题
+        """
+        import aiohttp
+
+        param_key, param_value, default_video_url = self._normalize_bvid(video_id)
+        # 优先用原始 URL（含的参数对风控/统计无影响，但保留以保持原始来源）
+        video_url = original_url or default_video_url
+
+        headers = self._build_headers()
+        api_url = "https://api.bilibili.com/x/web-interface/view"
+
+        # 默认值：API 失败时退化为用 video_id 作标题
+        title = video_id
+        description = ""
+        pic = ""
+        created = ""
+        aid = ""
+        bvid = video_id if video_id.startswith("BV") else ""
+        nickname = None
+        uid = None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    api_url, params={param_key: param_value}, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("code") == 0:
+                            v = data.get("data", {})
+                            title = v.get("title", "") or video_id
+                            description = v.get("desc", "") or ""
+                            pic = v.get("pic", "") or ""
+                            created = str(v.get("pubdate", 0))
+                            aid = str(v.get("aid", ""))
+                            bvid = v.get("bvid", "") or bvid
+                            owner = v.get("owner", {}) or {}
+                            nickname = owner.get("name") or None
+                            uid = str(owner.get("mid") or "") or None
+        except Exception:
+            # API 失败（412 风控/网络异常等）：退化为用 video_id 作标题
+            # yt-dlp 仍可直接下载，文件名会是 {video_id}_{video_id}.mp4
+            pass
+
+        # item_id 优先用 bvid，否则用 av{aid}，再否则用原始 video_id
+        item_id = bvid or (f"av{aid}" if aid else video_id)
+
+        return DownloadItem(
+            item_id=item_id,
+            item_type="video",
+            title=title,
+            urls=[video_url],
+            create_time=created,
+            cover_url=pic,
+            description=description,
+            nickname=nickname,
+            uid=uid,
+        )
+
     def _build_headers(self) -> dict:
         """构建请求头"""
         headers = {

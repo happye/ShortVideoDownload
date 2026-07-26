@@ -39,8 +39,8 @@
 - 注意：`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie（API 域名需要鉴权，CDN 域名不需要）
 
 ### 单视频链接下载
-- `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 URL 格式（`/explore/{id}`、`/discovery/item/{id}`、`/note/{id}`）
-- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`，小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；快手/B站/微博未实现 `fetch_single_item`，不支持单视频下载
+- `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 + B站 2 种 URL 格式（`/video/BVxxx`、`/video/avxxx`）
+- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`；小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；B站调用 `view` API 拿标题/UP主（失败退化为 video_id 作标题，yt-dlp 仍可下载）；快手/微博未实现 `fetch_single_item`，不支持单视频下载
 - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
 
 ### 抖音视频URL回退

@@ -138,6 +138,10 @@ def detect_single_video(url: str) -> tuple:
       - https://www.xiaohongshu.com/discovery/item/{note_id}  (旧格式)
       - https://www.xiaohongshu.com/note/{note_id}       (笔记直链)
 
+    支持的B站格式:
+      - https://www.bilibili.com/video/BVxxxxxxxxxx       (BV号，可带 ?spm_id_from= 等参数)
+      - https://www.bilibili.com/video/av123456           (av号旧格式)
+
     注意: 小红书访问详情页需要 xsec_token，由 fetch_single_item 从原始 URL 提取。
     """
     from urllib.parse import urlparse, parse_qs
@@ -174,6 +178,15 @@ def detect_single_video(url: str) -> tuple:
         m = re.search(r'/note/([A-Za-z0-9]{8,})', url)
         if m:
             return ("xiaohongshu", m.group(1))
+    elif platform == "bilibili":
+        # 1. /video/BVxxxxxxxxxx （BV号，B站主推格式）
+        m = re.search(r'bilibili\.com/video/(BV[A-Za-z0-9]+)', url)
+        if m:
+            return ("bilibili", m.group(1))
+        # 2. /video/av123456 （av号旧格式，保留 av 前缀以区分 BV 号）
+        m = re.search(r'bilibili\.com/video/av(\d+)', url, re.IGNORECASE)
+        if m:
+            return ("bilibili", f"av{m.group(1)}")
     return (None, None)
 
 
