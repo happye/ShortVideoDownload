@@ -868,20 +868,32 @@ class XiaohongshuEngine(BaseEngine):
             return None
 
         # 提取视频 URL
+        # 注意：小红书 2026-07 更新了 stream key 命名
+        #   旧: h264 / h265 / av1（编码格式名）
+        #   新: EF4 / EF5 / EF6 / EF7（内部代号，EF4=H.264, EF5=H.265, EF6=AV1）
+        # 字段名 masterUrl / backupUrls 未变。遍历所有 key 按 videoBitrate 降序选最高画质，
+        # 这样无论小红书再怎么改 key 命名都能兼容。
         video_url = ''
         video = note.get('video')
         if video:
             streams = (video.get('media') or {}).get('stream') or {}
-            for k in ('h264', 'h265', 'av1'):
-                stream_list = streams.get(k) or []
-                if stream_list:
-                    video_url = stream_list[0].get('masterUrl', '') or ''
-                    if not video_url:
-                        backup = stream_list[0].get('backupUrls') or []
-                        if backup:
-                            video_url = backup[0]
-                    if video_url:
-                        break
+            all_streams = []
+            for stream_list in streams.values():
+                if not isinstance(stream_list, list):
+                    continue
+                for s in stream_list:
+                    if isinstance(s, dict) and (s.get('masterUrl') or s.get('backupUrls')):
+                        all_streams.append(s)
+            # 按 videoBitrate 降序排序（最高画质优先）
+            all_streams.sort(key=lambda s: s.get('videoBitrate', 0), reverse=True)
+            for s in all_streams:
+                video_url = s.get('masterUrl', '') or ''
+                if not video_url:
+                    backup = s.get('backupUrls') or []
+                    if backup:
+                        video_url = backup[0]
+                if video_url:
+                    break
 
         # 提取图片 URL 列表
         image_urls = []
@@ -915,8 +927,9 @@ class XiaohongshuEngine(BaseEngine):
         image_urls = detail.get('imageUrls', [])
 
         # 判断是视频还是图片
+        # 视频笔记通常也有 1 个 imageList（封面图），不能仅凭 image_urls 判断为图集
         is_video = note_type == 'video' or (video_url and not image_urls)
-        is_image = note_type == 'normal' or bool(image_urls)
+        is_image = note_type == 'normal' or (bool(image_urls) and not video_url)
 
         if is_video and video_url:
             urls = [video_url]
@@ -940,7 +953,11 @@ class XiaohongshuEngine(BaseEngine):
             cover_url = 'https://' + cover_url[7:]
 
         # 标题：优先用详情页的 title，其次用列表的 displayTitle
-        title = detail.get('title', '') or note_info.get('display_title', '') or f'note_{note_id}'
+        # 都为空时用 nickname + note_id（比纯 note_id 更友好，用户能识别作者）
+        title = detail.get('title', '') or note_info.get('display_title', '')
+        if not title:
+            nickname_for_title = detail.get('nickname', '') or nickname
+            title = f'{nickname_for_title}_{note_id}' if nickname_for_title else f'note_{note_id}'
         desc = detail.get('desc', '') or title
         note_nickname = detail.get('nickname', '') or nickname
 

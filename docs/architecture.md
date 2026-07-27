@@ -190,6 +190,7 @@ output/
 - 翻页：滚动页面到底部触发新请求（5-10 秒间隔，连续 2 次无新增停止，安全上限 100 次）
 - 详情页访问间隔 3-5 秒（真实用户快速浏览节奏），默认不限数量（滚动到底）
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
+- **video stream 提取**：`video.media.stream` 的 key 命名不稳定（旧 `h264`/`h265`/`av1`，新 `EF4`/`EF5`/`EF6`/`EF7`），遍历所有 key 按 `videoBitrate` 降序选最高画质，字段名 `masterUrl`/`backupUrls`
 - 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA）
 
 ### B站

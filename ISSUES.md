@@ -2,6 +2,22 @@
 
 ## 修改记录
 
+### 2026-07-28 小红书 video stream key 命名变化导致视频被误判为图集
+
+- **问题**：小红书单视频链接下载失败，dry-run 显示类型为"图集"但标题是 fallback `note_{note_id}`，实际下载只有封面图没有视频
+- **根因**：小红书 2026-07 更新了 `video.media.stream` 的 key 命名
+  - 旧 key：`h264` / `h265` / `av1`（编码格式名）
+  - 新 key：`EF4` / `EF5` / `EF6` / `EF7`（内部代号，EF4=H.264, EF5=H.265, EF6=AV1）
+  - 字段名 `masterUrl` / `backupUrls` 未变
+  - 代码硬编码 `for k in ('h264', 'h265', 'av1')` 找不到 stream，`video_url` 为空
+  - 视频笔记的 `imageList` 有 1 个封面图，`is_image = bool(image_urls)` 误判为图集
+- **修复**：
+  1. `engines/xiaohongshu.py` `_fetch_note_detail_via_page`：遍历所有 stream keys（不固定列表），按 `videoBitrate` 降序选最高画质
+  2. `is_image` 判断增加 `and not video_url` 条件：视频笔记有封面图但不应判为图集
+  3. 标题 fallback 改进：title 为空时用 `nickname_noteId`（比纯 `note_{note_id}` 更友好）
+- **修改文件**：`engines/xiaohongshu.py`
+- **验证**：测试 URL `https://www.xiaohongshu.com/explore/6a66f29a000000001b01db95` 成功下载 7.7MB 视频
+
 ### 2026-07-26 B站 Cookie 文件 expires=-1 导致 yt-dlp 跳过 SESSDATA
 
 - **问题**：运行 `_fetch_bili_cookie.py` 登录后下载视频仍失败，错误 `WARNING: skipping cookie file entry due to invalid expires at -1`

@@ -86,6 +86,7 @@
   - 三处复用：登录检测（`user.loggedIn` / `user.userInfo.nickname`）/ SSR 笔记提取 / 笔记详情提取
   - 笔记列表：**SSR `__INITIAL_STATE__.user.notes[0]` 为主**（notes 是数组的数组，每个 tab 一个数组；含完整 xsecToken），user_posted API 拦截为辅（补充 SSR 之外的更多笔记）
   - 笔记详情：`__INITIAL_STATE__.note.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`
+- **video stream key 命名不稳定**：小红书会不定期改 `video.media.stream` 的 key（旧 `h264`/`h265`/`av1` → 新 `EF4`/`EF5`/`EF6`/`EF7`），字段名 `masterUrl`/`backupUrls` 未变。**必须遍历所有 stream keys，不能硬编码列表**，按 `videoBitrate` 降序选最高画质
 - **不能依赖 user_posted API 拿首屏**：API 的 cursor 会跳过前 30 个，只返回 4 个 `has_more=False` 的更早笔记，必须从 SSR 提取
 - **字段命名陷阱**：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名
 - **响应拦截器必须在 `page.goto()` 之前注册**：用于补充捕获 SSR 之外的更多笔记（首次 user_posted API 在 goto 期间就发出）
@@ -95,6 +96,7 @@
 - 下载用 aiohttp（与抖音一致），图片 URL 需 `http://` → `https://`
 - 下载请求的 UA 用 `self._user_agent`（从 `navigator.userAgent` 获取的真实 UA），保证 UA 和浏览器指纹一致
 - **大文件断点续传**：重试时用 `Range: bytes={已下载大小}-` header 从断点继续，不删除已下载部分（避免 95MB+ 大文件在 CDN 断流处反复失败）；timeout `total=600, sock_read=60`；chunk 64KB
+- **视频/图集类型判断**：视频笔记的 `imageList` 有 1 个封面图，不能仅凭 `image_urls` 非空判为图集。`is_image` 必须加 `and not video_url` 条件
 
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
