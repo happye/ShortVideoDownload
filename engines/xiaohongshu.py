@@ -87,6 +87,43 @@ def _is_port_in_use(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
+def _find_stale_chrome_pids() -> list:
+    """返回使用本项目独立 Profile 的 chrome.exe 进程 PID 列表
+
+    只匹配命令行含 chrome-profile 的进程（本项目 user-data-dir 目录名），
+    不会误杀用户日常 Chrome（默认 Profile 路径不含此目录名）。
+    """
+    ps_script = (
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+        "Where-Object { $_.CommandLine -like '*chrome-profile*' } | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    try:
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-Command', ps_script],
+            capture_output=True, text=True, timeout=20,
+        )
+        return [int(line.strip()) for line in r.stdout.splitlines() if line.strip().isdigit()]
+    except Exception:
+        return []
+
+
+def _kill_stale_chrome() -> int:
+    """强制结束本项目 Profile 的残留 Chrome 进程（僵尸进程恢复用），返回杀掉的进程数
+
+    场景：上次会话异常退出后 Chrome 进程残留，9222 端口被占但 DevTools
+    会话已卡死，connect_over_cdp 会一直挂到超时（180s）。杀掉后重启全新实例。
+    """
+    pids = _find_stale_chrome_pids()
+    for pid in pids:
+        try:
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+    return len(pids)
+
+
 def _sanitize_js_object_literals(json_str: str) -> str:
     """清理 JS 对象字面量中 JSON 非法的值，返回可被 json.loads 的字符串
 
@@ -317,43 +354,6 @@ class XiaohongshuEngine(BaseEngine):
         if self._browser is not None:
             return
 
-        # 1. 如 CDP 端口未监听，启动真实 Chrome
-        if not _is_port_in_use(CDP_PORT):
-            chrome_path = _find_chrome_executable()
-            CHROME_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-            args = [
-                chrome_path,
-                f'--remote-debugging-port={CDP_PORT}',
-                f'--user-data-dir={CHROME_USER_DATA_DIR}',
-                '--no-first-run',
-                '--no-default-browser-check',
-                '--mute-audio',
-                # 不加 --headless（headless 是检测点）
-                # 不加 --no-startup-window（CDP 模式必须有窗口）
-                # 不加 --disable-blink-features=AutomationControlled：
-                #   真实 Chrome 用户启动永远不会带这个参数，是 Playwright/Puppeteer
-                #   的经典反检测标记，反而暴露自动化身份。patchright 已在协议层
-                #   修补 navigator.webdriver，不依赖此参数。
-            ]
-            self._chrome_process = subprocess.Popen(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # 等待 CDP 端口就绪（最长 15 秒）
-            for _ in range(30):
-                if _is_port_in_use(CDP_PORT):
-                    break
-                await asyncio.sleep(0.5)
-            else:
-                raise RuntimeError(
-                    f"Chrome 启动超时，CDP 端口 {CDP_PORT} 未就绪。\n"
-                    "可能原因：已有 Chrome 实例占用，请先关闭所有 Chrome 窗口后重试。"
-                )
-
-        # 2. 用 Patchright 通过 CDP 连接（API 与 Playwright 完全兼容）
         try:
             from patchright.async_api import async_playwright
         except ImportError:
@@ -362,10 +362,72 @@ class XiaohongshuEngine(BaseEngine):
                 "（patchright 是 playwright 的反检测 fork，修补了 Runtime.enable / Console.enable 协议层泄漏）"
             )
 
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.connect_over_cdp(
-            f'http://127.0.0.1:{CDP_PORT}'
+        # 最多尝试 2 次：第 1 次失败通常是上次会话残留的僵尸 Chrome
+        # （进程活着占着端口，但 DevTools 会话已卡死），杀掉后重启即可恢复
+        for attempt in range(2):
+            # 1. 如 CDP 端口未监听，启动真实 Chrome 并等待端口就绪（最长 15 秒）
+            if not _is_port_in_use(CDP_PORT):
+                self._launch_chrome()
+                for _ in range(30):
+                    if _is_port_in_use(CDP_PORT):
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    raise RuntimeError(
+                        f"Chrome 启动超时，CDP 端口 {CDP_PORT} 未就绪。\n"
+                        "可能原因：已有 Chrome 实例占用，请先关闭所有 Chrome 窗口后重试。"
+                    )
+
+            # 2. 用 Patchright 通过 CDP 连接（API 与 Playwright 完全兼容）
+            self._playwright = await async_playwright().start()
+            try:
+                # timeout 必须显式设置：默认 180s，僵尸 Chrome 会白等 3 分钟
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    f'http://127.0.0.1:{CDP_PORT}', timeout=30_000
+                )
+                return
+            except Exception:
+                if self._playwright:
+                    try:
+                        await self._playwright.stop()
+                    except Exception:
+                        pass
+                    self._playwright = None
+                if attempt == 0:
+                    killed = _kill_stale_chrome()
+                    self._log(f"CDP 连接失败（疑似残留僵尸 Chrome），已清理 {killed} 个进程，重启 Chrome 重试...")
+                    await asyncio.sleep(2)
+                    continue
+                raise RuntimeError(
+                    f"Chrome CDP 连接失败（已尝试自动清理僵尸进程并重启）。\n"
+                    f"请手动关闭所有 Chrome 窗口后重试，或重新运行本命令。"
+                )
+
+    def _launch_chrome(self):
+        """启动真实 Chrome（独立 Profile + CDP 调试端口）"""
+        chrome_path = _find_chrome_executable()
+        CHROME_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+        args = [
+            chrome_path,
+            f'--remote-debugging-port={CDP_PORT}',
+            f'--user-data-dir={CHROME_USER_DATA_DIR}',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--mute-audio',
+            # 不加 --headless（headless 是检测点）
+            # 不加 --no-startup-window（CDP 模式必须有窗口）
+            # 不加 --disable-blink-features=AutomationControlled：
+            #   真实 Chrome 用户启动永远不会带这个参数，是 Playwright/Puppeteer
+            #   的经典反检测标记，反而暴露自动化身份。patchright 已在协议层
+            #   修补 navigator.webdriver，不依赖此参数。
+        ]
+        self._chrome_process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+        # 端口就绪检查由调用方异步等待（这里不能阻塞事件循环）
 
     async def _close_browser(self):
         """断开 CDP 连接
@@ -1054,11 +1116,10 @@ class XiaohongshuEngine(BaseEngine):
             cover_url = 'https://' + cover_url[7:]
 
         # 标题：优先用详情页的 title，其次用列表的 displayTitle
-        # 都为空时用 nickname + note_id（比纯 note_id 更友好，用户能识别作者）
+        # 都为空时用 nickname（_make_filepath 会自动追加 note_id 后缀，这里不再拼）
         title = detail.get('title', '') or note_info.get('display_title', '')
         if not title:
-            nickname_for_title = detail.get('nickname', '') or nickname
-            title = f'{nickname_for_title}_{note_id}' if nickname_for_title else f'note_{note_id}'
+            title = detail.get('nickname', '') or nickname or f'note_{note_id}'
         desc = detail.get('desc', '') or title
         note_nickname = detail.get('nickname', '') or nickname
 

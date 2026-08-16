@@ -134,6 +134,24 @@
 3. **`__INITIAL_STATE__` 解析失败**（已在 2026-07-29 修复）：小红书会不定期在状态 JSON 中混入 JS 专有值（如 `new Map([])`），导致 `json.loads` 整体失败。修复见 `_sanitize_js_object_literals()`；如果再次失败，抓取 HTML 检查 `window.__INITIAL_STATE__=` 后的 JSON 中出现的新 JS 语法
 ---
 
+### 小红书 CDP 连接超时 / Chrome 卡死
+
+**现象**：`BrowserType.connect_over_cdp: Timeout 180000ms exceeded`，可能伴随 Node.js `Protocol error ... session closed` 崩溃输出
+
+**根因**：上次会话异常退出后 Chrome 进程残留，9222 端口被占但 DevTools 会话已卡死（僵尸进程）。
+
+**解决**（已在 2026-07-29 自动化）：
+
+引擎现在会自动处理：`connect_over_cdp` 30 秒超时 → 自动清理本项目 Profile 的僵尸 Chrome → 重启重试。如仍失败，手动清理：
+
+```powershell
+# 只杀本项目 Profile 的 Chrome（不影响日常浏览器）
+Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*chrome-profile*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+然后重新运行下载命令。
+---
+
 ### 小红书批量下载只能获取时间最早的几个文件
 
 **现象**：能登录、能拿到笔记，但只下载到时间最早的几个/十几个文件，最新笔记全部缺失

@@ -2,6 +2,18 @@
 
 ## 修改记录
 
+### 2026-07-29 小红书 CDP 连接 180s 超时（僵尸 Chrome 进程）
+
+- **问题**：下载报 `BrowserType.connect_over_cdp: Timeout 180000ms exceeded`，后跟 Node.js `Protocol error (Network.setCacheDisabled)` 崩溃和 Python `ResourceWarning` 噪音
+- **根因**：上次会话异常退出后 Chrome 进程残留（12 个进程），9222 端口被占但 DevTools 会话已卡死。`_ensure_browser` 只检查端口是否监听（通过），`connect_over_cdp` 未设 timeout（默认 180s），对卡死的 DevTools 一直挂到超时，且无恢复逻辑
+- **修复**（`engines/xiaohongshu.py`）：
+  - `connect_over_cdp` 显式 `timeout=30_000`（30 秒足够，不再白等 3 分钟）
+  - 新增 `_find_stale_chrome_pids()` / `_kill_stale_chrome()`：PowerShell CIM 按命令行匹配 `chrome-profile`（只杀本项目独立 Profile 的 Chrome，不误杀用户日常浏览器），taskkill 强制结束
+  - `_ensure_browser` 重构为 2 次尝试：连接失败 → 杀僵尸进程 → 重启 Chrome 重试；仍失败给出手动指引
+  - Chrome 启动逻辑抽为 `_launch_chrome()`
+- **附修**：title 为空时的 fallback 改为纯 nickname（原 `nickname_noteId` 与 `_make_filepath` 自动追加的 item_id 叠加，导致文件名 note_id 重复两次）
+- **验证**：清理僵尸进程后全新启动 Chrome，端到端下载 52.3MB 视频成功（11.7s），文件名后缀单一
+
 ### 2026-07-29 小红书 __INITIAL_STATE__ 混入 new Map() 表达式导致 JSON 解析失败
 
 - **问题**：小红书单笔记链接下载报"无法获取笔记 xxx 详情（可能 Cookie 失效或笔记已删除）"，用户更新 Cookie 仍失败

@@ -81,6 +81,7 @@
   - **CDP 模式下不要 `new_context()`**：会触发 `ERR_CONNECTION_CLOSED`，必须用 `browser.contexts[0]`
   - **CDP 模式下不要 `context.close()`**：会关闭 Chrome 默认 context 的所有标签页，影响用户其他标签页；只 `page.close()`
   - **`_close_browser` 不杀 Chrome 子进程**：让独立 Profile 持久化累积"生活痕迹"
+  - **`connect_over_cdp` 必须显式 `timeout=30_000`**：默认 180s，遇到僵尸 Chrome（进程活着占端口但 DevTools 卡死）会白等 3 分钟。`_ensure_browser` 连接失败时自动 `_kill_stale_chrome()`（按命令行匹配 `chrome-profile`，只杀本项目 Profile 的 Chrome）后重启重试一次
   - **不要加 `--disable-blink-features=AutomationControlled` 启动参数**：真实 Chrome 用户永远不会带此参数，它是 Playwright/Puppeteer 的经典反检测标记，通过 `chrome://version` 或 `process.argv` 直接可见。patchright 已在协议层修补 `navigator.webdriver`，不依赖此参数
   - **滚动用 `page.mouse.wheel()`，不要用 `page.evaluate('window.scrollBy()')`**：后者不触发 wheel 事件，网站可监听 wheel 事件 vs scrollY 变化区分真假滚动
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
