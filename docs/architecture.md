@@ -180,7 +180,7 @@ output/
   - 不覆盖 UA / viewport / locale / timezone（UA 必须和浏览器实际指纹一致）
 - 数据来源：从 `page.content()` 的 HTML 中直接提取 `window.__INITIAL_STATE__` 的 JSON
   - **不能用 `page.evaluate('window.__INITIAL_STATE__')`**：patchright CDP 模式下页面内联 `<script>` 不在 main world 执行
-  - 模块级函数 `_extract_initial_state_from_html(html)`：括号匹配 + `undefined`→`null` 正则替换 → `json.loads`
+  - 模块级函数 `_extract_initial_state_from_html(html)`：括号匹配 + `_sanitize_js_object_literals()` 清理 JSON 非法的 JS 值（`undefined`/`NaN`/`Infinity`/`new Map([])` 等 → `null`）→ `json.loads`
   - **笔记列表**：以 SSR `__INITIAL_STATE__.user.notes[0]` 为主（notes 是数组的数组，含完整 `xsecToken`），user_posted API 拦截为辅
     - 不能依赖 user_posted API 拿首屏：API 的 cursor 会跳过前 30 个笔记，只返回 4 个 `has_more=False` 的更早笔记
     - 字段命名：SSR 中是 `xsecToken`（驼峰），API 响应中是 `xsec_token`（下划线），`_fetch_note_detail_via_page` 兼容两种命名

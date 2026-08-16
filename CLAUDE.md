@@ -60,6 +60,10 @@
 - 当 `bit_rate` 为空时，必须回退到 `video.play_addr.url_list`（直接播放地址）
 - 无 URL 的条目（非视频非图集）应跳过，不加入下载队列
 
+### 抖音单视频详情
+- **不要用 `handler.fetch_one_video`**：`aweme_detail` 为 null 时抛固定错误"如果是动图作品，则接口正在维护中"（误导）
+- 用 `crawler.fetch_post_detail` 拿原始响应，`aweme_detail` 为 null 时读 `filter_detail.detail_msg` + `filter_reason`（真实原因：隐私设置 `status_friend_see`、删除、下架等）
+
 ### 小红书引擎（CDP + Patchright 反检测）
 - **反检测架构（基于 yousali.com 反检测实战文章验证）**：
   - **用 `connect_over_cdp` 连接真实 Chrome**，不是 `launch()` 启动 Chromium
@@ -82,7 +86,8 @@
 - 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空
 - 数据来源：从 `page.content()` 的 HTML 中直接提取 `window.__INITIAL_STATE__` 的 JSON
   - **不要用 `page.evaluate('window.__INITIAL_STATE__')`**：patchright CDP 模式下页面内联 `<script>window.__INITIAL_STATE__=...</script>` 不在 main world 执行（evaluate 本身确实在 main world，能访问 DOM 元素属性如 `__vue_app__`，但读不到 inline script 设置的 window 全局变量，`__SSR__` 同理读不到）
-  - 模块级函数 `_extract_initial_state_from_html(html)` 实现提取：`marker` 定位 → 括号匹配（处理字符串内的括号）→ `undefined`→`null` 正则替换（JS 对象字面量可含 `undefined`，JSON 标准不允许）→ `json.loads`
+  - 模块级函数 `_extract_initial_state_from_html(html)` 实现提取：`marker` 定位 → 括号匹配（处理字符串内的括号）→ `_sanitize_js_object_literals()` 清理 JSON 非法的 JS 值 → `json.loads`
+  - **`__INITIAL_STATE__` 会混入 JS 专有值**（2026-07 确认 `new Map([])`，如 `AiNoteDetailStore.noteDetailMap`），JSON 标准不允许。`_sanitize_js_object_literals()` 逐字符扫描 + 字符串状态跟踪，只在字符串外替换：`undefined`/`NaN`/`Infinity`/`-Infinity` → `null`；`new Xxx(...)` → `null`（括号匹配完整范围）。不要用简单正则替换（误伤字符串内容且不覆盖 `new Map()`）
   - 三处复用：登录检测（`user.loggedIn` / `user.userInfo.nickname`）/ SSR 笔记提取 / 笔记详情提取
   - 笔记列表：**SSR `__INITIAL_STATE__.user.notes[0]` 为主**（notes 是数组的数组，每个 tab 一个数组；含完整 xsecToken），user_posted API 拦截为辅（补充 SSR 之外的更多笔记）
   - 笔记详情：`__INITIAL_STATE__.note.noteDetailMap[note_id].note`，含 `video.media.stream`/`imageList`

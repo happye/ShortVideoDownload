@@ -87,6 +87,107 @@ def _is_port_in_use(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
+def _sanitize_js_object_literals(json_str: str) -> str:
+    """清理 JS 对象字面量中 JSON 非法的值，返回可被 json.loads 的字符串
+
+    小红书 2026-07 起 __INITIAL_STATE__ 混入 JS 专有值，JSON 标准不允许：
+    - undefined / NaN / Infinity / -Infinity → null
+    - new Map([...]) / new Set([...]) 等 new Xxx(...) 表达式 → null
+      （如 AiNoteDetailStore.noteDetailMap = new Map([])；这些 Ai*Store 数据不用于本引擎）
+
+    逐字符扫描并跟踪字符串状态，只在字符串外替换，避免误伤字符串内容
+    （如笔记标题包含 "undefined" 字样时不被替换）。
+    """
+    _NEW_EXPR_RE = re.compile(r'new\s+[\w.]+\s*\(')
+    _LITERAL_LEN = {'undefined': 9, 'NaN': 3, 'Infinity': 8}
+
+    out = []
+    i = 0
+    n = len(json_str)
+    in_string = False
+    escape = False
+    while i < n:
+        c = json_str[i]
+        if escape:
+            escape = False
+            out.append(c)
+            i += 1
+            continue
+        if c == '\\':
+            escape = True
+            out.append(c)
+            i += 1
+            continue
+        if c == '"':
+            in_string = not in_string
+            out.append(c)
+            i += 1
+            continue
+        if in_string:
+            out.append(c)
+            i += 1
+            continue
+        # 非字符串区域：undefined / NaN / Infinity（含负 Infinity）→ null
+        if c == '-' and json_str.startswith('-Infinity', i):
+            out.append('null')
+            i += 9
+            continue
+        matched_lit = False
+        for lit, lit_len in _LITERAL_LEN.items():
+            if json_str.startswith(lit, i):
+                # 词边界检查，避免匹配 undefinedXxx 之类的属性名片段
+                after = json_str[i + lit_len:i + lit_len + 1]
+                if after == '' or not (after.isalnum() or after in '_$'):
+                    out.append('null')
+                    i += lit_len
+                    matched_lit = True
+                break
+        if matched_lit:
+            continue
+        # 非字符串区域：new Xxx(...) → null（括号匹配完整范围）
+        m = _NEW_EXPR_RE.match(json_str, i)
+        if m:
+            close = _find_matching_paren(json_str, m.end() - 1)
+            if close < 0:
+                # 未闭合（异常输入），保守放弃替换
+                out.append(c)
+                i += 1
+                continue
+            out.append('null')
+            i = close + 1
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def _find_matching_paren(s: str, open_pos: int) -> int:
+    """从 open_pos（'(' 位置）开始找匹配的 ')' 位置，处理字符串和嵌套，未找到返回 -1"""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(open_pos, len(s)):
+        c = s[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\':
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
 def _extract_initial_state_from_html(html: str):
     """从 HTML 中直接提取 window.__INITIAL_STATE__ 的 JSON 并解析
 
@@ -132,9 +233,9 @@ def _extract_initial_state_from_html(html: str):
     if end < 0:
         return None
     json_str = html[start:end + 1]
-    # JS 对象字面量可能包含 undefined（JSON 标准不允许），替换为 null
-    json_str = re.sub(r'(?<=:)\s*undefined(?=\s*[,}\]])', 'null', json_str)
-    json_str = re.sub(r'(?<=[,\[])\s*undefined(?=\s*[,}\]])', 'null', json_str)
+    # JS 对象字面量包含 JSON 非法值（undefined / NaN / Infinity / new Map(...)），
+    # 清理后才能 json.loads（详见 _sanitize_js_object_literals）
+    json_str = _sanitize_js_object_literals(json_str)
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:

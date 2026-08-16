@@ -2,6 +2,27 @@
 
 ## 修改记录
 
+### 2026-07-29 小红书 __INITIAL_STATE__ 混入 new Map() 表达式导致 JSON 解析失败
+
+- **问题**：小红书单笔记链接下载报"无法获取笔记 xxx 详情（可能 Cookie 失效或笔记已删除）"，用户更新 Cookie 仍失败
+- **排查**：Cookie 实际有效（`user.loggedIn = true`）；带 xsec_token 访问详情页正常（页面标题正常渲染）；根因是 `__INITIAL_STATE__` JSON 解析失败
+- **根因**：小红书在 `__INITIAL_STATE__` 中混入 JS 专有值，JSON 标准不允许：
+  - `undefined`（原有，旧正则已覆盖）
+  - **`new Map([])`**（新增，如 `AiNoteDetailStore.noteDetailMap = new Map([])`，旧正则不覆盖）→ `json.loads` 整体失败 → 返回 None → 报"Cookie 失效"误导用户
+- **修复**：`engines/xiaohongshu.py` 新增 `_sanitize_js_object_literals()` 替代旧的 undefined 正则：
+  - 逐字符扫描 + 字符串状态跟踪，只在字符串外替换（笔记标题含 "undefined" 字样不误伤）
+  - 覆盖 `undefined` / `NaN` / `Infinity` / `-Infinity` → `null`，词边界检查防误匹配
+  - 覆盖 `new Xxx(...)` 表达式 → `null`（`_find_matching_paren()` 括号匹配完整范围，处理嵌套和字符串）
+- **修改文件**：`engines/xiaohongshu.py`
+- **验证**：测试 URL（18 图图集）成功下载 19 个文件 3.1MB
+
+### 2026-07-29 抖音 fetch_one_video 报"动图作品接口维护"误导错误
+
+- **问题**：抖音单视频下载报 `fetch_one_video请求失败。如果是动图作品，则接口正在维护中，请稍后再试`
+- **根因**：视频作者隐私设置（`filter_reason: status_friend_see` 仅好友可见），API 返回 `aweme_detail: null` + `filter_detail`；f2 的 `fetch_one_video` 在 `nickname is None` 时抛固定错误信息，不读 `filter_detail`
+- **修复**：`engines/douyin.py` `fetch_single_item` 改为直接调用 `crawler.fetch_post_detail`，检查 `aweme_detail` 为 null 时提取 `filter_detail.detail_msg` + `filter_reason` 给出真实原因
+- **修改文件**：`engines/douyin.py`
+
 ### 2026-07-28 小红书 video stream key 命名变化导致视频被误判为图集
 
 - **问题**：小红书单视频链接下载失败，dry-run 显示类型为"图集"但标题是 fallback `note_{note_id}`，实际下载只有封面图没有视频

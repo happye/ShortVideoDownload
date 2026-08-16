@@ -125,6 +125,15 @@
 3. 确认 `on_response` 拦截器在 `page.goto()` 之前注册（通过 `captured_data` 共享状态）
 ---
 
+### 小红书单笔记报"无法获取笔记详情（可能 Cookie 失效或笔记已删除）"
+
+**排查顺序**（按命中率）：
+
+1. **URL 缺少有效的 `xsec_token`**：无 token 或 token 过期访问详情页会被重定向到 404（`error_code=300031` 当前笔记暂时无法浏览）。解决：从浏览器地址栏复制完整 URL（含 `xsec_token` 参数），token 有时效性，隔天需要重新复制
+2. **Cookie 失效**：确认 cookies.txt 中有 `xiaohongshu.com` 的 Cookie 且未过期（可先用首页登录态验证）
+3. **`__INITIAL_STATE__` 解析失败**（已在 2026-07-29 修复）：小红书会不定期在状态 JSON 中混入 JS 专有值（如 `new Map([])`），导致 `json.loads` 整体失败。修复见 `_sanitize_js_object_literals()`；如果再次失败，抓取 HTML 检查 `window.__INITIAL_STATE__=` 后的 JSON 中出现的新 JS 语法
+---
+
 ### 小红书批量下载只能获取时间最早的几个文件
 
 **现象**：能登录、能拿到笔记，但只下载到时间最早的几个/十几个文件，最新笔记全部缺失

@@ -232,8 +232,33 @@ class DouyinEngine(BaseEngine):
         handler = DouyinHandler(kwargs)
 
         # 调用 f2 获取单视频详情
+        # 直接调用 crawler.fetch_post_detail 获取原始响应，先检查 aweme_detail 是否为 null。
+        # handler.fetch_one_video 在 aweme_detail 为 null 时会抛出误导性错误
+        # "如果是动图作品，则接口正在维护中"，实际原因可能是隐私设置（filter_detail）。
         try:
-            aweme_data = await handler.fetch_one_video(str(video_id))
+            from f2.apps.douyin.crawler import DouyinCrawler
+            from f2.apps.douyin.model import PostDetail
+            from f2.apps.douyin.filter import PostDetailFilter
+
+            async with DouyinCrawler(kwargs) as crawler:
+                params = PostDetail(aweme_id=str(video_id))
+                raw_response = await crawler.fetch_post_detail(params)
+
+            if not isinstance(raw_response, dict) or not raw_response.get('aweme_detail'):
+                # aweme_detail 为 null，提取 filter_detail 获取具体原因
+                filter_detail = (raw_response or {}).get('filter_detail') if isinstance(raw_response, dict) else {}
+                detail_msg = (filter_detail or {}).get('detail_msg', '')
+                filter_reason = (filter_detail or {}).get('filter_reason', '')
+                if detail_msg:
+                    raise RuntimeError(
+                        f"获取抖音视频 {video_id} 详情失败: {detail_msg}"
+                        + (f"（原因: {filter_reason}）" if filter_reason else "")
+                    )
+                raise RuntimeError(f"获取抖音视频 {video_id} 详情失败: API 返回 aweme_detail 为空")
+
+            aweme_data = PostDetailFilter(raw_response)
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"获取抖音视频 {video_id} 详情失败: {e}")
 
