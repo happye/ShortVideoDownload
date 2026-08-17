@@ -7,6 +7,7 @@ from .kuaishou import KuaishouEngine
 from .xiaohongshu import XiaohongshuEngine
 from .bilibili import BilibiliEngine
 from .weibo import WeiboEngine
+from .x import XEngine
 
 ENGINES = {
     "douyin": DouyinEngine,
@@ -14,6 +15,7 @@ ENGINES = {
     "xiaohongshu": XiaohongshuEngine,
     "bilibili": BilibiliEngine,
     "weibo": WeiboEngine,
+    "x": XEngine,
 }
 
-__all__ = ["ENGINES", "DouyinEngine", "KuaishouEngine", "XiaohongshuEngine", "BilibiliEngine", "WeiboEngine"]
+__all__ = ["ENGINES", "DouyinEngine", "KuaishouEngine", "XiaohongshuEngine", "BilibiliEngine", "WeiboEngine", "XEngine"]

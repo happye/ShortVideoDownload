@@ -3,6 +3,7 @@ ShortVideoDownload - 工具函数
 """
 import os
 import re
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -187,6 +188,11 @@ def detect_single_video(url: str) -> tuple:
         m = re.search(r'bilibili\.com/video/av(\d+)', url, re.IGNORECASE)
         if m:
             return ("bilibili", f"av{m.group(1)}")
+    elif platform == "x":
+        # https://x.com/{user}/status/{id} 或 https://twitter.com/{user}/status/{id}
+        m = re.search(r'(?:x|twitter)\.com/[^/]+/status/(\d+)', url)
+        if m:
+            return ("x", m.group(1))
     return (None, None)
 
 
@@ -220,6 +226,15 @@ def extract_user_id(url: str, platform: str) -> str:
         match = re.search(r'weibo\.com/u/(\d+)', url)
         if match:
             return match.group(1)
+    elif platform == "x":
+        # https://x.com/{screen_name} 或 https://x.com/{screen_name}/media
+        path = url.split('?')[0].rstrip('/')
+        match = re.search(r'(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})(?:/media)?$', path)
+        if match:
+            reserved = {'home', 'i', 'explore', 'search', 'settings', 'messages',
+                        'notifications', 'compose', 'intent', 'hashtag', 'login', 'signup'}
+            if match.group(1).lower() not in reserved:
+                return match.group(1)
 
     # 回退：尝试提取 URL 最后一段路径
     match = re.search(r'/([A-Za-z0-9_-]+)/?$', url.rstrip('/'))
@@ -471,6 +486,7 @@ def load_cookies_from_file(domain: str) -> str:
     domain_alt_map = {
         "bilibili.com": ["bilibili.cn", "bilibili.tv"],
         "weibo.com": ["weibo.cn"],
+        "x.com": ["twitter.com"],
     }
     alts = domain_alt_map.get(domain, [])
     for alt in alts:
@@ -489,6 +505,7 @@ def get_domain_for_platform(platform: str) -> str:
         "xiaohongshu": "xiaohongshu.com",
         "bilibili": "bilibili.com",
         "weibo": "weibo.com",
+        "x": "x.com",
     }
     return domain_map.get(platform, "")
 
@@ -498,8 +515,112 @@ def get_alt_domains_for_platform(platform: str) -> list:
     alt_map = {
         "bilibili": ["bilibili.cn", "bilibili.tv"],
         "weibo": ["weibo.cn"],
+        "x": ["twitter.com"],
     }
     return alt_map.get(platform, [])
+
+
+def load_netscape_cookie_dicts(domain: str) -> list:
+    """
+    从项目根目录 cookies.txt 加载指定域名的完整 Cookie 信息
+    返回 Playwright add_cookies 格式的 dict 列表（保留 domain/path/secure/httpOnly/expires），
+    供 CDP 浏览器注入使用（X 引擎）。同一 (name, domain) 重复时保留 expires 最长的一条。
+
+    支持 "#HttpOnly_" 前缀行（yt-dlp / 浏览器扩展导出的 httpOnly Cookie 标记）。
+    自动包含备用域名（通过 get_alt_domains_for_platform 的映射）。
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    cookie_file = os.path.join(project_root, "cookies.txt")
+    if not os.path.exists(cookie_file):
+        return []
+
+    domains = {domain.lstrip('.')}
+    # 备用域名（x.com → twitter.com）
+    alt_map = {"x.com": ["twitter.com"]}
+    domains |= set(alt_map.get(domain, []))
+
+    best = {}  # (name, domain) -> cookie dict
+    try:
+        with open(cookie_file, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                http_only = False
+                if raw.startswith('#HttpOnly_'):
+                    http_only = True
+                    raw = raw[len('#HttpOnly_'):]
+                elif raw.startswith('#'):
+                    continue
+                parts = raw.split('\t')
+                if len(parts) < 7:
+                    continue
+                cookie_domain = parts[0]
+                domain_clean = cookie_domain.lstrip('.')
+                if not (domain_clean in domains or
+                        any(domain_clean.endswith('.' + d) or d.endswith('.' + domain_clean)
+                            for d in domains)):
+                    continue
+                try:
+                    expires = float(parts[4])
+                except ValueError:
+                    expires = -1
+                name = parts[5]
+                value = parts[6]
+                if not name:
+                    continue
+                key = (name, cookie_domain)
+                if key in best and best[key].get('expires', -1) >= expires:
+                    continue
+                best[key] = {
+                    'name': name,
+                    'value': value,
+                    'domain': cookie_domain,
+                    'path': parts[2] or '/',
+                    'secure': parts[3].upper() == 'TRUE',
+                    'httpOnly': http_only,
+                    'expires': expires if expires > 0 else -1,
+                }
+    except Exception:
+        return []
+
+    return list(best.values())
+
+
+def get_system_proxy() -> str:
+    """读取 Windows 系统代理设置（WinINET，Chrome/Edge 同源）
+    返回 aiohttp 可用的代理 URL（如 http://127.0.0.1:7890），未启用返回空串
+    """
+    if sys.platform != 'win32':
+        return ""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+        )
+        try:
+            enable, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+            if not enable:
+                return ""
+            server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+        finally:
+            winreg.CloseKey(key)
+        if not server:
+            return ""
+        # "http=host:port;https=host:port" 按协议分发格式 → 取 http 的
+        if '=' in server:
+            for part in server.split(';'):
+                if part.startswith('http='):
+                    server = part[5:]
+                    break
+            else:
+                return ""
+        if not server.startswith(('http://', 'https://', 'socks5://')):
+            server = f'http://{server}'
+        return server
+    except Exception:
+        return ""
 
 
 def suppress_f2_logging():

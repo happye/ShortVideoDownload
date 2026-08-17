@@ -2,6 +2,28 @@
 
 ## 修改记录
 
+### 2026-08-17 X 平台引擎上线（新平台）
+
+- **功能**：新增 X（Twitter）引擎 `engines/x.py`，复用小红书的 Chrome CDP + Patchright 反检测架构，数据来源改为**拦截浏览器自身发出的 GraphQL 响应**（不构造 API 请求、无硬编码 queryId），支持用户主页批量下载（图+视频，仅本人原创）与单条推文下载
+- **开发中适配的 3 个 X 2026 现实**：
+  1. GraphQL operation 名不固定（`UserMedia` → `UserVideoTimeline` → `UserOriginalsTimeline`）→ 解析改为递归收集所有响应中含 `extended_entities` 的 tweet dict，按 `rest_id` 去重，不依赖 operation 名
+  2. 用户对象结构改版：`screen_name` 从 `user_results.result.legacy` 移到 `result.core`，`_tweet_user_info()` 兼容双结构
+  3. twimg CDN 直连超时（Chrome 走系统代理但 aiohttp 不走）→ 下载自动用代理：`--proxy` 优先，否则 `utils.get_system_proxy()` 读 Windows WinINET 系统代理
+- **修改文件**：`engines/x.py`（新增）、`config.py`（注册 x 平台）、`utils.py`（X 域名/用户名/单推提取、`load_netscape_cookie_dicts`、`get_system_proxy`）、`engines/__init__.py`、`svd.py`、`AGENTS.md`、`CLAUDE.md`、README、docs/*
+- **验证**：@Shinoha_yuki（视频作者）dry-run 17 条 + 下载 3/3 成功（23.6MB）；@9cxVxtWnef49612（图片作者）图集下载 3/3 成功；单条推文链接验证通过
+
+### 2026-08-17 X 纯图片作者被误判"用户不存在或已被冻结"
+
+- **问题**：`https://x.com/9cxVxtWnef49612` 报"用户不存在或已被冻结"，但该用户明明发布过媒体
+- **根因**（两层叠加）：
+  1. X 新版把 `/{user}/media` 变成「视频」tab——纯图片作者显示"尚未发布视频"空态，其图片作品实际混在主页「帖子」tab（`UserOriginalsTimeline` 接口）
+  2. 引擎用 DOM `[data-testid="emptyState"]` 检测用户不存在，被该空态误触发
+- **修复**（`engines/x.py`）：
+  1. 抓取入口改为主页 `x.com/{user}`（帖子 tab = 本人全部原创媒体，图+视频，天然不含转推）
+  2. 用户存在性改由 `UserByScreenName` 响应判定（`UserUnavailable` = 不存在/冻结），删除 DOM 空态检测；用户存在但无媒体时正常提示"未找到作品"不报错
+  3. 附带：多视频推文拆分下载时标题加 `[i/n]` 序号
+- **验证**：该用户 dry-run 列出图集（20/20 条作者均为本人），实际下载 3/3 成功；视频作者无回归
+
 ### 2026-07-29 小红书 CDP 连接 180s 超时（僵尸 Chrome 进程）
 
 - **问题**：下载报 `BrowserType.connect_over_cdp: Timeout 180000ms exceeded`，后跟 Node.js `Protocol error (Network.setCacheDisabled)` 崩溃和 Python `ResourceWarning` 噪音

@@ -165,6 +165,38 @@ Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.Co
 
 ---
 
+### X 报"X 未登录，无法获取用户媒体时间线"
+
+**原因**：X 强制登录才能看用户时间线，cookies.txt 中无 x.com 的 `auth_token`/`ct0` 且 `.chrome-profile` 也未登录。
+
+**解决**（任选其一）：
+1. 在已登录 X 的浏览器导出 cookies.txt（含 x.com 域），放到项目根目录
+2. 在引擎弹出的 Chrome 窗口中手动登录 X 一次（Profile 持久化，之后免登录）
+3. `--cookie "auth_token=xxx; ct0=xxx"` 手动提供
+
+---
+
+### X 下载失败 "Cannot connect to host video.twimg.com / pbs.twimg.com"
+
+**原因**：X 的 CDN（twimg.com）在部分网络环境无法直连。Chrome 走系统代理所以能浏览，但 aiohttp 下载不会自动走代理。
+
+**解决**（任选其一）：
+1. 无需操作——引擎会自动读 Windows 系统代理（与 Chrome 同源），日志会显示 `使用代理下载: http://...`
+2. 显式指定：`python svd.py "URL" --proxy http://127.0.0.1:7890`
+
+若自动代理未生效（系统未开代理但你有本地代理端口），用方案 2。
+
+---
+
+### X 报"用户 @xxx 不存在或已被冻结"但浏览器能看到该用户
+
+**判定依据**：此报错只会在 X 官方 `UserByScreenName` 接口返回 `UserUnavailable` 时触发（2026-08-17 后）。若浏览器能正常访问，多为 Cookie 失效导致接口降级，重新导出 cookies.txt 后重试。
+
+**注意**：用户存在但没有任何媒体（纯文字博主）不会报错，只会提示"未找到任何作品"。
+
+---
+
+
 ### f2 库 a_bogus 签名失效
 
 **现象**：抖音 API 返回空响应（HTTP 200 但无内容）

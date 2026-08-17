@@ -90,6 +90,7 @@ def parse_args():
   小红书: https://www.xiaohongshu.com/user/profile/5f...
   B站:    https://space.bilibili.com/123456
   微博:   https://weibo.com/u/123456
+  X:      https://x.com/username
 
 示例:
   python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..."

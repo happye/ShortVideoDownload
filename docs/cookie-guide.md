@@ -26,6 +26,7 @@ python svd.py "https://www.douyin.com/user/MS4wLjAB..."
 - 快手引擎只取 `kuaishou.com` 的 Cookie
 - 小红书引擎只取 `xiaohongshu.com` 的 Cookie
 - B站引擎只取 `bilibili.com` 的 Cookie
+- X 引擎取 `x.com` / `twitter.com` 的 Cookie（完整信息注入浏览器，非拼接字符串）
 
 ### Cookie 更新
 
@@ -71,6 +72,7 @@ python svd.py "URL" --cookie "复制的Cookie字符串"
 | 小红书 | 登录态 Cookie | 未登录时 302 重定向 |
 | B站 | `SESSDATA` | 登录凭证；无 Cookie 触发 412 风控，连免费 1080p 都拿不到 |
 | 微博 | 登录态 Cookie | 未登录无法获取列表 |
+| X | `auth_token` + `ct0` | X 强制登录才能看用户时间线；从浏览器导出 cookies.txt（x.com 域）即可，`auth_token` 有效期约 1 年 |
 
 ### 快手 web_st 问题
 

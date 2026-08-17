@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-短视频平台用户作品批量下载工具。三套引擎：抖音用 f2 库，小红书用 Chrome CDP + Patchright，B站纯 yt-dlp，快手/微博用自研 API + yt-dlp。
+短视频平台用户作品批量下载工具。多套引擎：抖音用 f2 库，小红书/X 用 Chrome CDP + Patchright，B站纯 yt-dlp，快手/微博用自研 API + yt-dlp。
 
 ## 关键规则
 
@@ -39,8 +39,8 @@
 - 注意：`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie（API 域名需要鉴权，CDN 域名不需要）
 
 ### 单视频链接下载
-- `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 + B站 2 种 URL 格式（`/video/BVxxx`、`/video/avxxx`）
-- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`；小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；B站调用 `view` API 拿标题/UP主（失败退化为 video_id 作标题，yt-dlp 仍可下载）；快手/微博未实现 `fetch_single_item`，不支持单视频下载
+- `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 + B站 2 种 + X 1 种（`/{user}/status/{id}`）URL 格式
+- 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`；小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；B站调用 `view` API 拿标题/UP主（失败退化为 video_id 作标题，yt-dlp 仍可下载）；X 访问推文页拦截 `TweetDetail` 响应；快手/微博未实现 `fetch_single_item`，不支持单视频下载
 - `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
 
 ### B站引擎（完全基于 yt-dlp）
@@ -104,6 +104,15 @@
 - **大文件断点续传**：重试时用 `Range: bytes={已下载大小}-` header 从断点继续，不删除已下载部分（避免 95MB+ 大文件在 CDN 断流处反复失败）；timeout `total=600, sock_read=60`；chunk 64KB
 - **视频/图集类型判断**：视频笔记的 `imageList` 有 1 个封面图，不能仅凭 `image_urls` 非空判为图集。`is_image` 必须加 `and not video_url` 条件
 
+### X 引擎（CDP + Patchright 拦截 GraphQL）
+- **数据来源是拦截浏览器自身的 GraphQL 响应**（`page.on('response')`），绝不自己构造 API 请求。解析**不依赖 operation 名称**（X 不定期改名：`UserMedia` → `UserVideoTimeline` → `UserOriginalsTimeline`），递归收集响应中含 `extended_entities` 的 tweet dict 按 `rest_id` 去重
+- **抓取入口必须用主页** `x.com/{user}`（帖子 tab `UserOriginalsTimeline` = 本人全部原创媒体，图+视频，无转推）。**不能用 `/{user}/media`**——新版只是「视频」tab，纯图片作者显示空态会被误判用户不存在
+- **用户存在性只由 `UserByScreenName` 响应判定**（`UserUnavailable` = 不存在/冻结），**不能用 DOM `[data-testid="emptyState"]`**（会被"尚未发布视频"空态误触发）
+- **用户对象双结构**：`screen_name`/`name` 可能位于 `user_results.result.legacy` 或 `result.core`，`_tweet_user_info()` 兼容两种，取值必须走它
+- 只收 `screen_name == 目标用户` 的推文（作者过滤），排除推荐/引用的他人推文
+- **下载 twimg CDN 必须走代理**：`--proxy` 优先，否则 `utils.get_system_proxy()` 读 Windows 系统代理（Chrome 同源）；aiohttp 不会自动走系统代理
+- Cookie：`auth_token`（httpOnly）+ `ct0`；cookies.txt 用 `utils.load_netscape_cookie_dicts()` 完整注入浏览器（保留 httpOnly/secure/expires），不是拼接字符串
+
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
 2. `cookies.txt` 文件回退（Netscape 格式，按域名自动筛选）
@@ -155,3 +164,4 @@ python fix_names.py "用户URL" "output/douyin/用户目录"
 | 小红书 | Chrome CDP+Patchright | 需有效 Cookie |
 | B站 | yt-dlp（投稿+合集+系列） | 需有效 Cookie |
 | 微博 | Web API | 需有效 Cookie |
+| X | Chrome CDP+Patchright（拦截 GraphQL 响应） | 需有效 Cookie（auth_token+ct0） |

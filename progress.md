@@ -33,6 +33,13 @@
 
 ## 项目开发历史
 
+### 2026-08-17 X 平台引擎
+- 新增 `engines/x.py`：复用小红书 CDP + Patchright 反检测架构，数据来源改为拦截浏览器自身的 GraphQL 响应（无硬编码 queryId）
+- 适配 X 2026 现实：operation 名不固定（解析不依赖名称）、用户对象 screen_name 双结构（legacy/core）、twimg 下载需代理（自动读系统代理）
+- 修复纯图片作者误判"用户不存在"：入口改主页帖子 tab（UserOriginalsTimeline），存在性由 UserByScreenName 判定
+- `utils.py` 新增 `load_netscape_cookie_dicts`（完整 Cookie 注入浏览器）、`get_system_proxy`（WinINET）
+- 验证：视频作者 + 图片作者 + 单条推文 全部实测通过
+
 ### 2026-07-26 B站引擎重构 + Cookie 获取工具
 
 - B站引擎完全基于 yt-dlp 重构：旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` API 已废弃 404，新 API 需 wbi 签名且 -799/412 风控严格

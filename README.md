@@ -1,6 +1,6 @@
 # ShortVideoDownload
 
-短视频平台用户作品批量下载工具，支持抖音、快手、小红书、B站、微博等平台。
+短视频平台用户作品批量下载工具，支持抖音、快手、小红书、B站、微博、X（Twitter）等平台。
 
 ## 功能特性
 
@@ -24,8 +24,9 @@
 | 小红书 | 视频 + 图集 | Chrome CDP + Patchright + aiohttp | 必需 | ✅ 支持 |
 | B站 | 视频 | yt-dlp（投稿+合集+系列） | 必需 | ✅ 支持 |
 | 微博 | 视频 + 图集 | 微博 Web API | 必需 | ❌ 不支持 |
+| X | 视频 + 图集（仅本人原创） | Chrome CDP + Patchright（拦截 GraphQL）+ aiohttp | 必需 | ✅ 支持 |
 
-> **单视频下载说明**：抖音、小红书、B站支持直接下载单个视频链接。抖音支持 `/video/{id}`、`/note/{id}`、`?modal_id=`、`iesdouyin.com/share/video/{id}` 四种格式；小红书支持 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}` 三种格式（可带 `?xsec_token=` 参数）；B站支持 `/video/BVxxx`、`/video/avxxx` 两种格式。
+> **单视频下载说明**：抖音、小红书、B站、X 支持直接下载单个视频链接。抖音支持 `/video/{id}`、`/note/{id}`、`?modal_id=`、`iesdouyin.com/share/video/{id}` 四种格式；小红书支持 `/explore/{id}`、`/discovery/item/{id}`、`/note/{id}` 三种格式（可带 `?xsec_token=` 参数）；B站支持 `/video/BVxxx`、`/video/avxxx` 两种格式；X 支持 `x.com/{user}/status/{id}`（twitter.com 域名亦可）。
 
 > **重要**：所有平台目前都需要登录 Cookie 才能获取用户作品列表。这是各平台的风控策略，不是工具限制。
 
@@ -100,6 +101,12 @@ python _fetch_bili_cookie.py
 
 # 下载小红书用户作品
 python svd.py "https://www.xiaohongshu.com/user/profile/5f..." --browser-cookie firefox
+
+# 下载 X 用户媒体（需 cookies.txt 含 x.com 的 auth_token+ct0；下载自动走系统代理）
+python svd.py "https://x.com/username"
+
+# 下载 X 单条推文
+python svd.py "https://x.com/username/status/1234567890"
 
 # 使用 cookies.txt 文件（最可靠）
 python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..."
@@ -190,7 +197,8 @@ ShortVideoDownload/
 │   ├── kuaishou.py     # 快手引擎 (Web API)
 │   ├── xiaohongshu.py  # 小红书引擎 (Chrome CDP + Patchright)
 │   ├── bilibili.py     # B站引擎 (yt-dlp，投稿+合集+系列)
-│   └── weibo.py        # 微博引擎 (Web API)
+│   ├── weibo.py        # 微博引擎 (Web API)
+│   └── x.py            # X 引擎 (Chrome CDP + Patchright，拦截 GraphQL)
 ├── _fetch_bili_cookie.py # B站 Cookie 获取工具（绕过 Edge App-Bound Encryption）
 ├── docs/
 │   ├── architecture.md # 架构设计

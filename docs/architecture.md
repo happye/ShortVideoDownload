@@ -21,7 +21,7 @@
 - **下载文件**：`aiohttp` 直接下载视频/图片流
 - **日志抑制**：f2 的 `log_setup()` 在 import 时初始化 logger（INFO 级别 + RichHandler），需要 monkey-patch `rich_console` + 设置 CRITICAL 级别
 
-### 2. Chrome CDP + Patchright 引擎（小红书专用）
+### 2. Chrome CDP + Patchright 引擎（小红书 / X）
 
 小红书有反爬虫检测：aiohttp 直接请求会被识别为未登录（`loggedIn: false`），note_id 返回空。因此使用真实 Chrome + Patchright CDP 连接获取数据（反检测架构详见 [CLAUDE.md 小红书引擎章节](../CLAUDE.md)）。
 
@@ -29,6 +29,8 @@
 - **获取详情**：真实 Chrome 访问笔记详情页，从 HTML 提取 `__INITIAL_STATE__.note.noteDetailMap` 中的视频/图片 URL
 - **下载文件**：`aiohttp` 直接下载视频/图片流（与抖音一致），支持断点续传
 - **反检测**：Patchright 协议层修补 CDP 泄漏 + 独立 user-data-dir 累积浏览痕迹 + cookie 注入
+
+X 引擎复用同一套 CDP 反检测架构，但数据来源不同——**拦截浏览器自身发出的 GraphQL 响应**（不构造 API 请求，无硬编码 queryId），详见「平台特殊处理 → X」。
 
 ### 3. yt-dlp + 自研 API（快手/微博）
 
@@ -79,7 +81,9 @@ cookies.txt 文件（Netscape 格式，按域名筛选）
 
 `utils.py` 中的关键函数：
 - `extract_browser_cookies(browser, domain)` — rookiepy 提取
-- `load_cookies_from_file(domain)` — 从 cookies.txt 按域名筛选
+- `load_cookies_from_file(domain)` — 从 cookies.txt 按域名筛选（返回 name=value 字符串）
+- `load_netscape_cookie_dicts(domain)` — 从 cookies.txt 按域名筛选（返回完整 Cookie dict 列表，含 httpOnly/secure/expires，供 CDP 浏览器注入，X 引擎用）
+- `get_system_proxy()` — 读 Windows 系统代理（WinINET，Chrome 同源），X 下载 twimg CDN 时自动使用
 - `get_domain_for_platform(platform)` — 平台→域名映射
 
 ## 去重机制
@@ -208,3 +212,15 @@ output/
 ### 微博
 - Web API 获取用户作品列表
 - 需要登录 Cookie
+
+### X
+- **数据来源：拦截浏览器自身的 GraphQL 响应**（`page.on('response')`），不构造 API 请求。浏览器自己发的请求带正确的 public bearer token / ct0 / x-client-transaction-id，无硬编码 queryId / features，X 改版不受影响
+- **解析不依赖 operation 名称**：GraphQL operation 名不固定（`UserMedia` → `UserVideoTimeline` → `UserOriginalsTimeline`），引擎递归收集所有响应中含 `extended_entities` 的 tweet dict，按 `rest_id` 去重
+- **入口必须是主页** `x.com/{user}`（帖子 tab，`UserOriginalsTimeline` = 本人全部原创媒体，图+视频，天然不含转推）。**不能用 `/media`**——新版 `/media` 只是「视频」tab，纯图片作者会显示空态被误判为用户不存在
+- **用户存在性由 `UserByScreenName` 响应判定**（`UserUnavailable` = 不存在/冻结），不能用 DOM 空态组件判断（原因同上）
+- **用户对象双结构兼容**：2026 改版后 `user_results.result.legacy.screen_name` → `result.core.screen_name`，`_tweet_user_info()` 兼容两种
+- 作者过滤：只收 `screen_name == 目标用户` 的推文，排除推荐/引用的他人推文；转推在 Originals 时间线本就不出现
+- Cookie：`auth_token` + `ct0`（cookies.txt 完整注入浏览器 或 `.chrome-profile` 已有登录态）；`auth_token` 是 httpOnly
+- **下载**：aiohttp 直连 twimg CDN（不带 Cookie，Referer `https://x.com/`），**需要代理**（`--proxy` 优先，否则自动读 Windows 系统代理）
+- 多视频推文拆分为多个 item（`{rest_id}_N`，标题加 `[i/n]` 序号）；图集合并为一个 item 一次下载全部原图（`name=orig`）
+- 单视频下载：访问推文页拦截 `TweetDetail` 响应，递归查找 `rest_id` 匹配的 tweet

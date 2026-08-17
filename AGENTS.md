@@ -5,7 +5,7 @@
 
 ## 项目概述
 
-短视频平台用户作品批量下载工具。三套引擎:抖音用 f2 库,小红书用 Chrome CDP + Patchright,B站纯 yt-dlp,快手/微博用自研 API+yt-dlp。
+短视频平台用户作品批量下载工具。多套引擎:抖音用 f2 库,小红书/X用 Chrome CDP + Patchright,B站纯 yt-dlp,快手/微博用自研 API+yt-dlp。
 
 ## 开发环境
 
@@ -31,6 +31,7 @@
 - `engines/bilibili.py` — B站(yt-dlp,投稿+合集+系列)
 - `engines/kuaishou.py` — 快手(GraphQL API + yt-dlp)
 - `engines/weibo.py` — 微博(Web API + yt-dlp)
+- `engines/x.py` — X(CDP + Patchright,拦截 GraphQL 响应)
 - `utils.py` — Cookie 提取 + URL 检测 + 文件名清理
 - `config.py` — 配置(save_dir, cookie, max_count 等)
 
@@ -70,3 +71,4 @@
 | B站 | yt-dlp（投稿+合集+系列） | 可用 | 需要 |
 | 快手 | GraphQL+yt-dlp | 需 web_st Cookie | 需要 |
 | 微博 | Web API+yt-dlp | 可用 | 需要 |
+| X | Chrome CDP+Patchright（拦截 GraphQL） | 可用 | 需要（auth_token+ct0） |

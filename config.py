@@ -18,6 +18,7 @@ PLATFORM_XIAOHONGSHU = "xiaohongshu"
 PLATFORM_BILIBILI = "bilibili"
 PLATFORM_WEIBO = "weibo"
 PLATFORM_TIKTOK = "tiktok"
+PLATFORM_X = "x"
 
 # 平台 URL 匹配规则
 PLATFORM_PATTERNS = {
@@ -45,6 +46,10 @@ PLATFORM_PATTERNS = {
     PLATFORM_TIKTOK: [
         r"tiktok\.com",
         r"vm\.tiktok\.com",
+    ],
+    PLATFORM_X: [
+        r"(?<![A-Za-z0-9.])x\.com",
+        r"twitter\.com",
     ],
 }
 
