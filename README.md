@@ -9,6 +9,7 @@
 - 高清/超清：自动选择最高画质，支持 4K/1080P
 - 自动归档：以用户名创建文件夹，文件名包含视频ID确保唯一
 - 智能去重：基于 item_id 判断，已下载视频自动跳过，不会重复下载
+- 失败重试：下载失败自动重试（视频断点续传、图片逐张重试）；失败条目记录到失败日志，随时 `--retry-failed` 重下
 - 断点续传：大文件下载中断后自动从断点继续（小红书），避免反复从头下载失败
 - 环境隔离：独立 venv 虚拟环境，不影响系统 Python
 - Cookie 提取：支持从浏览器自动提取 Cookie（推荐 Firefox）
@@ -107,6 +108,9 @@ python svd.py "https://x.com/username"
 
 # 下载 X 单条推文
 python svd.py "https://x.com/username/status/1234567890"
+
+# 重下失败日志中的条目（失败自动记录到 output/_failed_downloads.json，随时可重下）
+python svd.py --retry-failed
 
 # 使用 cookies.txt 文件（最可靠）
 python svd.py "https://www.douyin.com/user/MS4wLjABAAAA..."

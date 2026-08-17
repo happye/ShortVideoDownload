@@ -110,6 +110,7 @@
 - **用户存在性只由 `UserByScreenName` 响应判定**（`UserUnavailable` = 不存在/冻结），**不能用 DOM `[data-testid="emptyState"]`**（会被"尚未发布视频"空态误触发）
 - **用户对象双结构**：`screen_name`/`name` 可能位于 `user_results.result.legacy` 或 `result.core`，`_tweet_user_info()` 兼容两种，取值必须走它
 - 只收 `screen_name == 目标用户` 的推文（作者过滤），排除推荐/引用的他人推文
+- **不下载封面文件**：X 无封面概念，视频缩略图/图集首图与媒体本身重复（`cover_url` 不设置，无 `_cover.jpg`）
 - **下载 twimg CDN 必须走代理**：`--proxy` 优先，否则 `utils.get_system_proxy()` 读 Windows 系统代理（Chrome 同源）；aiohttp 不会自动走系统代理
 - Cookie：`auth_token`（httpOnly）+ `ct0`；cookies.txt 用 `utils.load_netscape_cookie_dicts()` 完整注入浏览器（保留 httpOnly/secure/expires），不是拼接字符串
 
@@ -123,6 +124,12 @@
 - 抖音 item_id：≥10 位纯数字；小红书 note_id：24 位十六进制；B站 BV号 `BV[A-Za-z0-9]{10}` / av号 `av\d+`
 - `download_item()` 检查目标文件是否已存在
 - 已存在 → 返回 `skipped=True`，不下载不重命名
+
+### 失败日志与重下
+- 下载失败自动记录到 `{save_dir}/_failed_downloads.json`（`utils.append_failed_entry`，原子写入；同 platform+item_id+save_dir 只保留最新一条），BaseEngine._record_failure 全平台生效
+- `python svd.py --retry-failed` 从日志重建 DownloadItem 直接重下（不重新爬列表）；成功移出日志，仍失败保留并更新错误
+- 重下按平台分组各建引擎，Cookie 每平台独立从 cookies.txt 加载；`-o` 自定义路径时重下需带相同 `-o`
+- X 图片下载逐张独立重试（`--retries`），已存在的单图跳过（部分成功图集的补下场景只下缺失图）
 
 ## 深入文档
 
@@ -147,6 +154,9 @@ python svd.py "URL" --dry-run
 
 # 限制数量
 python svd.py "URL" -n 10
+
+# 重下失败日志中的条目
+python svd.py --retry-failed
 
 # 重命名 untitled 文件（预览）
 python fix_names.py "用户URL" "output/douyin/用户目录" --dry-run

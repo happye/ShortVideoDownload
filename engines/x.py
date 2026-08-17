@@ -382,7 +382,7 @@ class XEngine(BaseEngine):
         create_time = _parse_created_at(legacy.get('created_at', ''))
 
         # 视频项：单视频用 rest_id；多视频每条一个（rest_id_N），标题加 [i/n] 序号
-        for i, (cover, url, duration) in enumerate(videos):
+        for i, (_cover, url, duration) in enumerate(videos):
             multi = len(videos) > 1 or bool(photos)
             item_id = rest_id if not multi else f"{rest_id}_{i + 1}"
             title = text or display_name
@@ -397,7 +397,7 @@ class XEngine(BaseEngine):
                 create_time=create_time,
                 nickname=display_name,
                 uid=screen_name,
-                cover_url=cover or None,
+                # X 无封面概念：缩略图与媒体重复，不设 cover_url（不下载 _cover 文件）
                 description=text,
                 duration=duration or None,
             ))
@@ -413,7 +413,6 @@ class XEngine(BaseEngine):
                 create_time=create_time,
                 nickname=display_name,
                 uid=screen_name,
-                cover_url=photos[0],
                 description=text,
             ))
         return items
@@ -771,37 +770,44 @@ class XEngine(BaseEngine):
                     return DownloadResult(True, item, saved_paths=[first_path], skipped=True, skip_reason="已存在")
 
                 headers = self._build_cdn_headers(is_video=False)
+                img_errors = []
                 async with aiohttp.ClientSession() as session:
                     for idx, img_url in enumerate(item.urls):
                         ext = self._image_ext(img_url)
                         filepath = self._make_filepath(save_dir, item, ext, idx=idx + 1)
-                        async with session.get(
-                            img_url, headers=headers, proxy=proxy,
-                            timeout=aiohttp.ClientTimeout(total=self.config.timeout),
-                            allow_redirects=True,
-                        ) as resp:
-                            if resp.status == 200:
-                                async with aiofiles.open(filepath, 'wb') as f:
-                                    async for chunk in resp.content.iter_chunked(8192):
-                                        await f.write(chunk)
-                                saved_paths.append(filepath)
+                        # 单图已存在（上次部分成功的补下场景）直接跳过
+                        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                            saved_paths.append(filepath)
+                            continue
+                        # 每张图独立重试（pbs.twimg.com 偶发连接抖动）
+                        last_err = None
+                        for attempt in range(self.config.max_retries):
+                            try:
+                                async with session.get(
+                                    img_url, headers=headers, proxy=proxy,
+                                    timeout=aiohttp.ClientTimeout(total=self.config.timeout),
+                                    allow_redirects=True,
+                                ) as resp:
+                                    if resp.status == 200:
+                                        async with aiofiles.open(filepath, 'wb') as f:
+                                            async for chunk in resp.content.iter_chunked(8192):
+                                                await f.write(chunk)
+                                        saved_paths.append(filepath)
+                                        last_err = None
+                                        break
+                                    last_err = f"HTTP {resp.status}"
+                            except (aiohttp.ClientPayloadError, aiohttp.ClientOSError,
+                                    ConnectionResetError, ConnectionError,
+                                    asyncio.TimeoutError, OSError) as e:
+                                last_err = str(e)
+                            if attempt < self.config.max_retries - 1:
+                                await asyncio.sleep(2 * (attempt + 1))
+                        if last_err:
+                            img_errors.append(f"图{idx + 1}: {last_err}")
+                if img_errors:
+                    return DownloadResult(False, item, error="; ".join(img_errors))
 
-            # 保存封面（视频封面 = 推文配图原图）
-            if self.config.save_cover and item.cover_url:
-                cover_path = self._make_filepath(save_dir, item, "_cover.jpg")
-                if not os.path.exists(cover_path):
-                    try:
-                        cover_headers = self._build_cdn_headers(is_video=False)
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(item.cover_url, headers=cover_headers, proxy=proxy,
-                                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                                if resp.status == 200:
-                                    async with aiofiles.open(cover_path, 'wb') as f:
-                                        async for chunk in resp.content.iter_chunked(8192):
-                                            await f.write(chunk)
-                                    saved_paths.append(cover_path)
-                    except Exception:
-                        pass
+            # X 无封面概念：不下载 _cover 文件（视频缩略图/图集首图与媒体本身重复）
 
             if not saved_paths:
                 return DownloadResult(False, item, error="未下载到任何文件")

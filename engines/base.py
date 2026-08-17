@@ -97,6 +97,22 @@ class BaseEngine(ABC):
         """输出日志到控制台"""
         print(msg, flush=True)
 
+    def _record_failure(self, item: DownloadItem, error: Optional[str], save_dir: str):
+        """把失败条目持久化到失败日志（供 --retry-failed 重下，无需重新爬列表）"""
+        try:
+            from dataclasses import asdict
+            from datetime import datetime
+            from utils import append_failed_entry
+            append_failed_entry(self.config.save_dir, {
+                'platform': self.platform,
+                'item': asdict(item),
+                'save_dir': save_dir,
+                'error': (error or '未知错误')[:500],
+                'failed_at': datetime.now().isoformat(timespec='seconds'),
+            })
+        except Exception as e:
+            self._log(f"  ⚠ 写入失败日志异常: {e}")
+
     async def download_user(self, user_url: str, items: list = None) -> List[DownloadResult]:
         """
         下载用户的所有作品（完整流程）
@@ -154,6 +170,7 @@ class BaseEngine(ABC):
                 self._log(f"  [{idx}/{total}] 完成{size_str}: {item.title[:40]}")
             else:
                 self._log(f"  [{idx}/{total}] 失败: {item.title[:40]} - {result.error}")
+                self._record_failure(item, result.error, save_dir)
 
             results.append(result)
 

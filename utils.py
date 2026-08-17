@@ -623,6 +623,51 @@ def get_system_proxy() -> str:
         return ""
 
 
+# ------------------------------------------------------------------ 失败日志
+# 下载失败的条目持久化到 {save_dir}/_failed_downloads.json，
+# 可随时用 `python svd.py --retry-failed` 重新下载（无需重新爬列表）
+
+FAILED_LOG_FILENAME = '_failed_downloads.json'
+
+
+def load_failed_log(save_dir: str) -> list:
+    """读取失败日志（不存在或损坏返回空列表）"""
+    import json
+    path = os.path.join(save_dir, FAILED_LOG_FILENAME)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_failed_log(save_dir: str, entries: list):
+    """原子写入失败日志（tmp + replace，防写入中断损坏）"""
+    import json
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, FAILED_LOG_FILENAME)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def append_failed_entry(save_dir: str, entry: dict):
+    """追加一条失败记录；同 platform+item_id+save_dir 只保留最新一条"""
+    entries = load_failed_log(save_dir)
+    item_id = (entry.get('item') or {}).get('item_id')
+    entries = [e for e in entries if not (
+        e.get('platform') == entry.get('platform')
+        and (e.get('item') or {}).get('item_id') == item_id
+        and e.get('save_dir') == entry.get('save_dir')
+    )]
+    entries.append(entry)
+    save_failed_log(save_dir, entries)
+
+
 def suppress_f2_logging():
     """
     抑制 f2 库的冗余日志输出

@@ -101,7 +101,9 @@ def parse_args():
 
     parser.add_argument(
         "url",
-        help="用户主页 URL"
+        nargs="?",
+        default=None,
+        help="用户主页 URL（--retry-failed 模式下可省略）"
     )
     parser.add_argument(
         "-o", "--output",
@@ -198,6 +200,11 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="仅列出作品信息，不下载"
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="重下失败日志中的条目（output/_failed_downloads.json，无需 URL）"
     )
     parser.add_argument(
         "--config",
@@ -526,6 +533,115 @@ async def run_download(url: str, config: DownloadConfig, mode: str, dry_run: boo
     print_summary(platform, results, elapsed)
 
 
+async def run_retry_failed(config: DownloadConfig):
+    """从失败日志读取失败条目并重新下载（成功的移出日志，仍失败的保留）"""
+    from utils import load_failed_log, save_failed_log, load_cookies_from_file, get_domain_for_platform
+    from engines.base import DownloadItem
+    import random
+
+    entries = load_failed_log(config.save_dir)
+    if not entries:
+        if RICH_AVAILABLE:
+            console.print(f"[yellow]! 失败日志为空，无待重下条目（{os.path.join(config.save_dir, '_failed_downloads.json')}）[/yellow]")
+        else:
+            print(f"失败日志为空，无待重下条目")
+        return
+
+    if RICH_AVAILABLE:
+        console.print(f"[bold green]>> 失败日志共 {len(entries)} 条，开始重下[/bold green]")
+    else:
+        print(f">> 失败日志共 {len(entries)} 条，开始重下")
+
+    # 按平台分组，每组一个引擎（避免 X/B站 等引擎重复初始化）
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for e in entries:
+        groups.setdefault(e.get('platform'), []).append(e)
+
+    original_cookie = config.cookie
+    start_time = datetime.now()
+    remaining = []
+    all_results = []
+
+    for platform, group in groups.items():
+        engine_class = ENGINES.get(platform)
+        if not engine_class:
+            for e in group:
+                e['error'] = f"平台 {platform} 引擎不存在"
+                remaining.append(e)
+            continue
+
+        # 每个平台独立加载 Cookie（cookies.txt 按域名筛选），避免上一平台的 Cookie 串台
+        config.cookie = original_cookie
+        if not config.cookie:
+            domain = get_domain_for_platform(platform)
+            if domain:
+                config.cookie = load_cookies_from_file(domain)
+
+        engine = engine_class(config)
+
+        for idx, e in enumerate(group, 1):
+            try:
+                item = DownloadItem(**e['item'])
+            except TypeError:
+                e['error'] = "日志条目损坏，无法重建下载项"
+                remaining.append(e)
+                continue
+
+            save_dir = e.get('save_dir') or os.path.join(config.save_dir, str(platform), 'unknown')
+            title = (item.title or item.item_id or '')[:40]
+            if RICH_AVAILABLE:
+                console.print(f"  [{idx}/{len(group)}] 重下: {title}")
+            else:
+                print(f"  [{idx}/{len(group)}] 重下: {title}")
+
+            try:
+                result = await engine.download_item(item, save_dir)
+            except Exception as ex:
+                result = DownloadResult(False, item, error=str(ex))
+
+            all_results.append(result)
+            if result.success:
+                if RICH_AVAILABLE:
+                    console.print(f"  [green]成功:[/green] {title}")
+                else:
+                    print(f"  成功: {title}")
+            else:
+                # 仍失败：更新错误信息保留在日志中
+                e['error'] = (result.error or '未知错误')[:500]
+                e['failed_at'] = datetime.now().isoformat(timespec='seconds')
+                remaining.append(e)
+                if RICH_AVAILABLE:
+                    console.print(f"  [red]仍失败:[/red] {title} - {result.error}")
+                else:
+                    print(f"  仍失败: {title} - {result.error}")
+
+            # 反检测：下载间隔（与正常批量下载一致）
+            if idx < len(group) and not result.skipped:
+                await asyncio.sleep(random.uniform(2.0, 5.0))
+
+    # 成功的移出日志，仍失败的保留
+    save_failed_log(config.save_dir, remaining)
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+    success = sum(1 for r in all_results if r.success)
+    failed = len(all_results) - success
+    if RICH_AVAILABLE:
+        console.print(f"\n[bold]── 重下完成 ──[/bold]")
+        console.print(f"  成功: [green]{success}[/green]  仍失败: [red]{failed}[/red]  耗时: {elapsed:.1f}s")
+        if failed == 0:
+            console.print("[green]失败日志已清空[/green]")
+        else:
+            console.print(f"[dim]剩余 {failed} 条仍保留在失败日志中，可再次运行 --retry-failed 重试[/dim]")
+    else:
+        print(f"\n── 重下完成 ──")
+        print(f"  成功: {success}  仍失败: {failed}  耗时: {elapsed:.1f}s")
+        if failed == 0:
+            print("失败日志已清空")
+        else:
+            print(f"剩余 {failed} 条仍保留在失败日志中，可再次运行 --retry-failed 重试")
+
+
 def check_dependencies():
     """检查依赖是否安装"""
     missing = []
@@ -605,7 +721,16 @@ def main():
 
     # 运行下载
     try:
-        asyncio.run(run_download(args.url, config, args.mode, args.dry_run))
+        if args.retry_failed:
+            asyncio.run(run_retry_failed(config))
+        else:
+            if not args.url:
+                if RICH_AVAILABLE:
+                    console.print("[red]X 缺少用户主页 URL（或使用 --retry-failed 重下失败条目）[/red]")
+                else:
+                    print("缺少用户主页 URL（或使用 --retry-failed 重下失败条目）")
+                sys.exit(1)
+            asyncio.run(run_download(args.url, config, args.mode, args.dry_run))
     except KeyboardInterrupt:
         if RICH_AVAILABLE:
             console.print("\n[yellow]用户中断[/]")
