@@ -39,7 +39,7 @@ if sys.platform == "win32":
             except Exception:
                 pass
 
-from utils import build_display_title, sanitize_filename, load_cookies_from_file, suppress_f2_logging
+from utils import build_display_title, sanitize_filename, load_cookies_from_file, suppress_f2_logging, prefilter_f2_logging
 
 
 def extract_item_id_from_filename(filename: str) -> str:
@@ -108,6 +108,7 @@ async def fetch_user_titles(user_url: str) -> dict:
     cookie = load_cookies_from_file("douyin.com")
 
     try:
+        prefilter_f2_logging()
         from f2.apps.douyin.handler import DouyinHandler
         from f2.apps.douyin.utils import ClientConfManager, SecUserIdFetcher
     except ImportError:

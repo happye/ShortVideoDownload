@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from engines.base import BaseEngine, DownloadItem, DownloadResult, sanitize_dirname
+from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig
 
 
@@ -550,6 +550,8 @@ class XiaohongshuEngine(BaseEngine):
             self._log(f"  限制下载 {effective_max} 个")
 
         user_id = self._extract_user_id(user_url)
+        # 记录稳定用户 ID，download_user/checkpoint 据此在改名后仍复用原目录
+        self._user_id = user_id
 
         # 保留原始 URL 中的 xsec_token 等参数
         parsed = urlparse(user_url)
@@ -669,8 +671,13 @@ class XiaohongshuEngine(BaseEngine):
             items = []
             total = len(notes)
             checkpoint_path = os.path.join(
-                self.config.save_dir, self.platform,
-                sanitize_dirname(nickname or user_id), '_checkpoint.json'
+                # 先用 note_id 指纹回绑历史目录（存量用户改名场景），
+                # 保证 checkpoint 也落在正确目录，断点不丢
+                self._resolve_user_dir(
+                    nickname or user_id,
+                    {n.get('note_id') or n.get('noteId') or n.get('id', '') for n in notes} - {''},
+                ),
+                '_checkpoint.json'
             )
             # 尝试从 checkpoint 恢复（支持崩溃后重新运行）
             checkpoint_done_ids = set()

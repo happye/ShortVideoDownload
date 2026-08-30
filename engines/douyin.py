@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig, load_f2_config
-from utils import suppress_f2_logging
+from utils import suppress_f2_logging, prefilter_f2_logging
 
 
 class DouyinEngine(BaseEngine):
@@ -52,6 +52,9 @@ class DouyinEngine(BaseEngine):
         通过 f2 API 获取作品元信息
         """
         try:
+            # f2 import 时会发起 msToken 网络请求，瞬时失败会打出长 traceback
+            # 后内部重试成功（自愈型），需在 import 前挂 filter 屏蔽
+            prefilter_f2_logging()
             from f2.apps.douyin.handler import DouyinHandler
             from f2.apps.douyin.utils import ClientConfManager
             from f2.apps.douyin.utils import SecUserIdFetcher
@@ -76,6 +79,8 @@ class DouyinEngine(BaseEngine):
 
         # 获取 sec_user_id
         sec_uid = await SecUserIdFetcher.get_sec_user_id(user_url)
+        # 记录稳定用户 ID，download_user 据此在改名后仍复用原保存目录
+        self._user_id = sec_uid
 
         # 构建 kwargs（使用 f2 默认配置 + 用户 Cookie）
         kwargs = dict(ClientConfManager.client_conf.get("douyin", {}))
@@ -207,6 +212,7 @@ class DouyinEngine(BaseEngine):
             DownloadItem 或 None（失败时）
         """
         try:
+            prefilter_f2_logging()
             from f2.apps.douyin.handler import DouyinHandler
             from f2.apps.douyin.utils import ClientConfManager
             suppress_f2_logging()

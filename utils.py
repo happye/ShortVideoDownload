@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 
@@ -53,6 +54,41 @@ def ensure_dir(path: str) -> str:
     """确保目录存在"""
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def parse_create_time(value) -> "datetime | None":
+    """
+    统一解析各平台发布时间 → datetime，失败返回 None
+    支持：epoch 秒（抖音/快手/B站，10位）、epoch 毫秒（小红书，13位）、
+    ISO 变体（X '2018-10-10 20:04'）、微博英文格式 'Wed Aug 12 07:34:56 +0800 2026'
+    """
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    # 纯数字：10 位=秒级，13 位=毫秒级
+    if s.isdigit():
+        n = int(s)
+        if n <= 0:
+            return None
+        if len(s) >= 13:
+            n //= 1000
+        try:
+            return datetime.fromtimestamp(n)
+        except (OverflowError, OSError, ValueError):
+            return None
+    # ISO 变体（X: '2018-10-10 20:04' / 标准 ISO 带 Z 或偏移）
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+    except ValueError:
+        pass
+    # 微博英文格式
+    try:
+        return datetime.strptime(s, '%a %b %d %H:%M:%S %z %Y')
+    except ValueError:
+        pass
+    return None
 
 
 def build_display_title(desc: str, max_len: int = 80) -> str:
@@ -228,7 +264,9 @@ def extract_user_id(url: str, platform: str) -> str:
             return match.group(1)
     elif platform == "x":
         # https://x.com/{screen_name} 或 https://x.com/{screen_name}/media
+        # 可选尾部日期范围参数：/20241201-20210506（X 引擎专用，此处剥离）
         path = url.split('?')[0].rstrip('/')
+        path = re.sub(r'/\d{8}[-_~]\d{8}$', '', path)
         match = re.search(r'(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})(?:/media)?$', path)
         if match:
             reserved = {'home', 'i', 'explore', 'search', 'settings', 'messages',
@@ -666,6 +704,33 @@ def append_failed_entry(save_dir: str, entry: dict):
     )]
     entries.append(entry)
     save_failed_log(save_dir, entries)
+
+
+def prefilter_f2_logging():
+    """
+    在 import f2 之前预先屏蔽 f2 logger 的所有日志记录。
+
+    f2 在 import 时（model.py 的 BaseRequestModel 类体）就会发起网络请求生成
+    msToken。瞬时网络/代理 TLS 失败（如 SSL: UNEXPECTED_EOF_WHILE_READING）
+    会先 logger.error 打出完整 traceback，然后 f2 内部静默重试并成功（自愈型
+    错误，不影响后续下载）。suppress_f2_logging() 在 import 之后才生效，拦截
+    不到 import 期间；而 f2 的 log_setup 只重置 level 和 handler，不会清除
+    预先挂上的 filter，所以必须在 import 前调用本函数挂 filter。
+
+    若 msToken 两次生成都失败，import 会直接抛出 APIConnectionError，由上层
+    正常捕获报错，因此本函数不会掩盖真正的致命错误。
+    """
+    import logging
+
+    class _SilenceFilter(logging.Filter):
+        _svd_mark = True
+
+        def filter(self, record):
+            return False
+
+    f2_logger = logging.getLogger("f2")
+    if not any(getattr(f, "_svd_mark", False) for f in f2_logger.filters):
+        f2_logger.addFilter(_SilenceFilter())
 
 
 def suppress_f2_logging():
