@@ -43,7 +43,8 @@
 
 - 抖音引擎逻辑只在 engines/douyin.py,其他引擎不得 import f2
 - Cookie 提取逻辑只在 utils.py,引擎只接收 config.cookie 字符串
-- 文件名必须包含 item_id 后缀(去重)
+- 文件名格式：`{发布日期YYYYMMDD}_{配文前15字}_{item_id后缀}`（去重靠 item_id）
+- 用户目录解析统一走 `BaseEngine._resolve_user_dir()`（`_users.json` 注册表 + item_id 指纹回绑，作者改名后复用原目录），引擎不得自行拼接昵称目录
 - **不要用 Edit/Write 工具修改 run.bat**(GBK 编码 + CRLF,会乱码)
 - max_count 两态:0(不限)/ N(限制数量)
 - 小红书:用 page.mouse.wheel() 滚动,不用 window.scrollBy()

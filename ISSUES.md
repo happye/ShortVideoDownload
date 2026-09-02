@@ -2,6 +2,64 @@
 
 ## 修改记录
 
+### 2026-09-02 抖音列表接口 403（ArgusSecurityPlugin 新增头校验）
+
+- **现象**：获取作品列表报 `HTTP状态码错误： Status Code: 403` 或翻页中途失败（f2 上游 issue #443 同源，"下载两页后 403"）
+- **根因**：抖音边缘网关新增 ArgusSecurityPlugin，`aweme/v1/web/aweme/post/` 列表接口强制校验 `uifid` 和 `x-tt-argus` 请求头，f2 默认请求头缺失被拦
+- **修复**（`engines/douyin.py` `_apply_argus_headers()`）：构造 f2 `kwargs` 时注入 `uifid`（随机 UUID hex）+ `x-tt-argus` 头，`fetch_user_items` 与 `fetch_item`（单视频详情，共用 DouyinCrawler）两处均已应用
+- **验证**：对照实验——原样请求第 1 页即 403；注入头后完整翻 5 页共 76 个作品；CLI `--dry-run` 实测列表正常返回
+
+### 2026-08-30 用户改名防重下（目录注册表 + 指纹回绑）+ f2 import 噪音抑制
+
+- **需求**：抖音/小红书作者改昵称后，工具按昵称建目录会新建目录并把所有作品重新下载一遍
+- **实现**（`engines/base.py` 为主）：
+  1. `output/{platform}/_users.json` 注册表维护 `user_id → 目录名`；引擎在 `fetch_user_items` 设置 `self._user_id`（抖音 sec_uid / 小红书 user_id）；`_resolve_user_dir()` 统一解析：注册表命中→复用原目录（目录名保留首次登记昵称，不跟随改名）；miss→指纹回绑；无匹配→按当前昵称新建登记。未设置 user_id 的引擎（B站/快手/微博/X）保持旧昵称行为
+  2. **指纹回绑**（覆盖升级前已改名的存量用户）：注册表 miss 时扫描各子目录文件名中的 item_id（复用 `_scan_existing_items`）与本批抓到的 item_id 求交集，**交集 ≥2 且主导率（交集/该目录作品数）≥0.5** 判定为历史目录自动登记。主导率防"目录混放少量他人作品"误绑；交集数优先选作品最多的主目录。选择主导率而非绝对阈值（初版 ≥3）：小作品量作者（只下过 2 个作品）改名场景也能回绑
+  3. **加固**（对抗性真实测试抓出的 bug 全修）：空昵称不写注册表（防 user_id 永久绑到 unknown 目录的毒化）；注册表命中不要求目录已存在（防 fetch 阶段写注册表→download 阶段目录未建导致二次解析分裂）；注册表值校验（`../..` 路径穿越 / 绝对路径劫持 / 非字符串崩溃，一律忽略并写回合法值自愈）
+  4. 小红书 checkpoint（`_checkpoint.json`）走同一目录解析，改名后崩溃恢复断点不丢
+- **验证**：22 项真实测试全过（注册表 14 + 边界安全 10 - 重复）+ asyncio 集成测试（改名→指纹回绑→跳过已下载 2 个→增量下载 1 个→无多余目录）+ f2 子进程 3 场景（fail-once 自愈零噪音 / fail-all 致命错误不掩盖 / regression 运行期抑制无回归）；commit d249a5b
+- **遗留**：`-n N` 限量模式下改名用户若本批全是新作品（交集 0）无法回绑，下次全量运行自动接回；单视频下载路径未设置 user_id（按昵称解析目录）
+
+### f2 import 期 msToken 报错噪音（SSL EOF traceback 但下载正常）
+
+- **现象**：获取作品列表前打印 `httpx.ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING]` 完整 traceback + `请前往QA文档 https://f2.wiki/faq`，随后下载一切正常
+- **根因**：f2 在被 import 时（`BaseRequestModel` 类体）就发起 msToken 生成请求，遇到瞬时 TLS 抖动失败；f2 内部 `try/except` 静默重试第二次成功（自愈型无害错误）。traceback 漏出的原因是错误发生在 import 过程中，而 `suppress_f2_logging()` 在 import 之后才调用，来不及生效
+- **修复**（`utils.py`）：新增 `prefilter_f2_logging()`，在 import f2 **之前**给 `"f2"` logger 挂 logging.Filter。关键前提（已从 f2 源码证实）：f2 所有日志记录直接创建在 `getLogger("f2")` 上，`log_setup()` 只 `handlers.clear()` + `setLevel`，**不清除 filters**，预挂 filter 可穿越它。调用点：`engines/douyin.py` 两处 import 前 + `fix_names.py`
+- **验证**：子进程 monkeypatch httpx 模拟瞬时 SSL 失败——import 成功、内部重试 2 次、零噪音；两次都失败时 import 仍抛 `APIConnectionError`（致命错误不掩盖）
+
+### 2026-08-17 X 日期范围参数（URL 尾接 /YYYYMMDD-YYYYMMDD）
+
+- **需求**：老账号全量抓取受 media tab 游标墙 + 自动回补耗时限制，用户需要按日期区间定点下载
+- **实现**（`engines/x.py` `_parse_date_range`）：
+  1. URL 尾接 `/20241201-20210506`（分隔符 `-` `_` `~` 均可，两端顺序不限自动排序，含两端；非真实日历日期（如 13 月/2 月 30 日）明确报错）
+  2. 带范围时跳过 media 视图（不支持日期过滤），探测主页（登录+存在性）后直搜该范围：180 天含端点窗口，查询 `until:末尾+1天`（X until 排他语义，不 +1 漏边界日）
+  3. 显式范围模式禁用空窗口熔断（用户明确指定范围，空段必须继续）；断点键 `{user}_rng{起}_{止}` 与全量任务互相隔离
+  4. 抓完按推文 UTC 日期安全网过滤（探测页顺带捕获的范围外最新推文剔除）
+- **验证**：单测全过（三种分隔符/乱序/非法日期/用户名提取/utils 链路/断点键隔离）；实测 Shinoha_yuki 2025-06-01~2025-08-01 抓到 89 条，时间全部落在范围内
+
+### 2026-08-17 X 深历史抓不全（media tab 游标深度墙）
+
+- **现象**：@Shinoha_yuki 资料页显示 1.3 万+ 媒体，工具只捕获 ~1300 条推文，时间停在 2024-12-01，更早的全部缺失
+- **根因**：**X 服务端对 media tab 分页游标有深度上限（~1500 条推文）**。视频视图 523 条、照片视图 ~777 条都是"真到底"（服务器不再返回更早数据），不是解析或滚动问题——任何靠滚动 media tab 的工具都过不去这道墙
+- **修复**（`engines/x.py` `_search_backfill`）：
+  1. `UserByScreenName` 响应顺带捕获 `media_count`（资料页媒体总数）+ 账号 `created_at`
+  2. 不限量模式下，双视图完成后若捕获媒体数 < `media_count`×95%，自动进入**搜索日期窗口回补**：浏览器访问 `x.com/search?q=from:用户 filter:videos|images since:起 until:止&f=live`，从最早已捕获推文往前 180 天一段逐段搜到账号创建日
+  3. 搜索时间线响应与 media 时间线同构（tweet dict 结构一致），现有递归拦截器零改动直接复用；`f=live`（Latest）必须显式指定——默认 Top 是策展子集不全
+  4. 熔断：连续 3 窗口零新增即停（media_count 可能含转推媒体，永远到不了 100%，防空转）；已完成查询 URL 记入断点防重搜；深度退避/断点续传/`saw_tweets` 底判定与主流程一致
+  5. 最终输出全局按发布时间倒序（多来源混排后插入序无意义）
+- **注意**：搜索单查询自身也有深度限制，但 180 天窗口的媒体量通常远低于该限制；若单窗口超深（半年发帖 >1500 条推文的极端作者）理论上仍会截断，可再缩短窗口
+
+### 2026-08-17 X 主页方案漏抓 + 混入转发（入口再修正为双 media 视图）
+
+- **问题**：用户实测发现①下载内容明显偏少；②混入转发内容。此前入口为主页帖子 tab（`UserOriginalsTimeline`）
+- **根因**（三层）：
+  1. **误判**："Originals" 只排除*回复*，**不排除转推**（此前理解错误）——RT 原推混在时间线里
+  2. **媒体密度低**：主页分页混大量纯文字推文（每页约 20 条中媒体仅占零头），同样滚动轮数拿到的媒体远少于 media tab
+  3. **提前误判到底**（漏抓主凶）：连续 3 轮无新增媒体即判"到底"，博主连发十几条纯文字推文时第 3 轮就误停，后面的媒体全部漏掉
+- **修复**（`engines/x.py`）：入口改为**双 media 视图**——`/media`（视频）+ `/media?filter=photo`（照片），各视图滚动到底按 `rest_id` 合并去重。media tab 天然只含博主自己的媒体（无转推/回复）且每页 100% 媒体密度（实测每轮稳定 +19 条）。另加转推双重防御过滤（`legacy.retweeted_status_result` 结构标记 + `full_text` 以 `RT @` 开头）
+- **验证**：@Shinoha_yuki dry-run——视频视图 42 轮到底 **523 条**（主页方案全量滚动也远达不到），照片视图自动切换继续增量；列表确认全部为本人原创、零转发；operation 命中 `UserVideoTimeline`（再次印证 operation 名不稳定）
+- **关联**：修正本文件 2026-08-17「纯图片作者误判」条目中"帖子 tab = 天然不含转推"的错误结论（该条修复的 UserByScreenName 存在性判定仍正确保留）
+
 ### 2026-08-17 X 平台引擎上线（新平台）
 
 - **功能**：新增 X（Twitter）引擎 `engines/x.py`，复用小红书的 Chrome CDP + Patchright 反检测架构，数据来源改为**拦截浏览器自身发出的 GraphQL 响应**（不构造 API 请求、无硬编码 queryId），支持用户主页批量下载（图+视频，仅本人原创）与单条推文下载

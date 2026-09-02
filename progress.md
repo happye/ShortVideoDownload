@@ -33,11 +33,23 @@
 
 ## 项目开发历史
 
+### 2026-08-30 改名防重下 + f2 import 噪音抑制
+- 用户目录注册表 `output/{platform}/_users.json`（user_id → 目录名）+ 指纹回绑（item_id 交集 ≥2 且主导率 ≥0.5）：抖音（sec_uid）/小红书（user_id）作者改名后继续写原目录增量下载，存量目录（含升级前已改名）自动接管；未设置 user_id 的引擎保持旧行为
+- 对抗性真实测试（22 项 + 集成 + f2 子进程 3 场景）抓出并修复 4 个 bug：空昵称 unknown 毒化 / fetch-download 目录分裂 / 小作品量回绑失败（改主导率判定）/ 注册表毒值路径逃逸与类型崩溃
+- `utils.prefilter_f2_logging()`：f2 import 期 msToken 自愈型报错（SSL EOF traceback 后内部重试成功）零噪音；致命错误不掩盖。调用点 douyin.py ×2 + fix_names.py
+- 详见 ISSUES.md 2026-08-30 条目；commit d249a5b
+
 ### 2026-08-17 X 平台引擎
 - 新增 `engines/x.py`：复用小红书 CDP + Patchright 反检测架构，数据来源改为拦截浏览器自身的 GraphQL 响应（无硬编码 queryId）
 - 适配 X 2026 现实：operation 名不固定（解析不依赖名称）、用户对象 screen_name 双结构（legacy/core）、twimg 下载需代理（自动读系统代理）
-- 修复纯图片作者误判"用户不存在"：入口改主页帖子 tab（UserOriginalsTimeline），存在性由 UserByScreenName 判定
+- 修复纯图片作者误判"用户不存在"：存在性由 UserByScreenName 判定
+- 入口迭代：主页帖子 tab → **双 media 视图**（`/media` 视频 + `/media?filter=photo` 照片，按 rest_id 合并去重）——主页方案 "Originals" 不排转推、媒体密度低、连续纯文字推文会误判到底漏抓；media tab 100% 媒体密度（实测 523 条视频全量）
+- 深度滚动健壮性（三年历史场景）：断点续传（`.checkpoint_{screen_name}.json`，崩溃/Ctrl-C/429 后重跑同命令续传）+ `saw_tweets` 回放感知底判定（防续传回放被误判到底）+ 深度退避（延迟随轮数递增防 429）+ 每视图新 page 释放 JS 堆 + Chrome `--autoplay-policy` 禁视频预览自动播放（防 OOM）
+- 深历史搜索回补：X media tab 有服务端游标深度墙（~1500 条推文，1.3 万媒体账号只抓到 2024-12）。`UserByScreenName` 的 `media_count`+`created_at` 判定覆盖不足（<95%）后，自动用搜索 180 天日期窗口（`filter:videos|images since/until`，`f=live`）从最早捕获点逐段回补到账号创建日；SearchTimeline 响应同构复用拦截器；连续 3 空窗口熔断；输出全局时间倒序
+- 日期范围参数（X 独有）：URL 尾接 `/YYYYMMDD-YYYYMMDD`（分隔符 `-`/`_`/`~`，顺序不限，含两端，真实日历日期校验）；带范围跳过 media 视图直搜该范围（180 天含端点窗口，until:+1 天补排他语义）；断点键 `{user}_rng{起}_{止}` 隔离；显式范围禁用空窗口熔断；实测 2 个月窗口 89 条全落范围内
 - `utils.py` 新增 `load_netscape_cookie_dicts`（完整 Cookie 注入浏览器）、`get_system_proxy`（WinINET）
+- 下载体验：图片逐张重试 + 失败日志 `output/_failed_downloads.json` + `--retry-failed` 免爬重下（全平台生效）；X 移除封面下载（与媒体重复）
+- 文件名改格式：`{YYYYMMDD}_{配文前15字}_{item_id}`，`utils.parse_create_time()` 统一四种时间格式
 - 验证：视频作者 + 图片作者 + 单条推文 全部实测通过
 
 ### 2026-07-26 B站引擎重构 + Cookie 获取工具

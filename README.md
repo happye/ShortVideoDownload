@@ -5,10 +5,11 @@
 ## 功能特性
 
 - 按用户下载：输入用户主页链接，批量下载该用户所有视频和图片（全平台支持）
-- 单视频下载：直接给单视频/图集链接，自动识别作者并归档到对应用户名目录（仅抖音、小红书支持）
+- 单视频下载：直接给单视频/图集链接，自动识别作者并归档到对应用户目录（抖音、小红书、B站、X 支持）
 - 高清/超清：自动选择最高画质，支持 4K/1080P
 - 自动归档：以用户名创建文件夹，文件名包含视频ID确保唯一
 - 智能去重：基于 item_id 判断，已下载视频自动跳过，不会重复下载
+- 改名防重下：作者改昵称后自动识别原目录继续增量下载（按用户 ID 注册表 + 作品指纹回绑，支持存量目录自动接管），不会新建目录重复下载
 - 失败重试：下载失败自动重试（视频断点续传、图片逐张重试）；失败条目记录到失败日志，随时 `--retry-failed` 重下
 - 断点续传：大文件下载中断后自动从断点继续（小红书），避免反复从头下载失败
 - 环境隔离：独立 venv 虚拟环境，不影响系统 Python
@@ -105,6 +106,11 @@ python svd.py "https://www.xiaohongshu.com/user/profile/5f..." --browser-cookie 
 
 # 下载 X 用户媒体（需 cookies.txt 含 x.com 的 auth_token+ct0；下载自动走系统代理）
 python svd.py "https://x.com/username"
+
+# 下载 X 指定日期范围的媒体（X 独有）：URL 后接 /YYYYMMDD-YYYYMMDD
+# 分隔符 - _ ~ 均可，两端日期顺序不限，范围含两端；老账号全量抓取会受
+# media tab 游标深度限制（~1500 条），用日期范围分段抓可覆盖全部历史
+python svd.py "https://x.com/username/20241201-20210506"
 
 # 下载 X 单条推文
 python svd.py "https://x.com/username/status/1234567890"
@@ -208,7 +214,7 @@ ShortVideoDownload/
 │   ├── architecture.md # 架构设计
 │   ├── cookie-guide.md # Cookie 配置指南
 │   └── troubleshooting.md # 故障排查
-├── output/             # 默认下载目录
+├── output/             # 默认下载目录（各平台子目录内含 _users.json 用户目录注册表）
 ├── cookies.txt         # Cookie文件（可选，Netscape格式）
 ├── venv/               # 独立虚拟环境
 ├── requirements.txt

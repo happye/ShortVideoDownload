@@ -19,7 +19,7 @@
 
 - **获取列表**：`DouyinHandler.fetch_user_post_videos()` 异步迭代器，自动处理分页
 - **下载文件**：`aiohttp` 直接下载视频/图片流
-- **日志抑制**：f2 的 `log_setup()` 在 import 时初始化 logger（INFO 级别 + RichHandler），需要 monkey-patch `rich_console` + 设置 CRITICAL 级别
+- **日志抑制**（两阶段）：f2 的 `log_setup()` 在 import 时初始化 logger（INFO 级别 + RichHandler）。① import **之前**调用 `utils.prefilter_f2_logging()` 挂 logging.Filter——f2 import 时（`BaseRequestModel` 类体）就会发起 msToken 网络请求，瞬时 TLS 失败会打完整 traceback 后内部重试成功（自愈型无害错误），filter 挡住这段噪音（f2 的 `log_setup` 只重置 level/handler，不会清除预挂的 filter；若 msToken 两次生成都失败，import 仍正常抛错，致命错误不掩盖）；② import **之后**调用 `suppress_f2_logging()` 设 CRITICAL 级别 + monkey-patch `rich_console`
 
 ### 2. Chrome CDP + Patchright 引擎（小红书 / X）
 
@@ -115,6 +115,7 @@ cookies.txt 文件（Netscape 格式，按域名筛选）
 ```
 output/
 ├── douyin/
+│   ├── _users.json          # 用户目录注册表（user_id → 目录名，改名防重下）
 │   └── 用户昵称/
 │       ├── 主标题_标签1_itemId.mp4
 │       ├── 主标题_标签1_itemId_cover.jpg
@@ -124,6 +125,20 @@ output/
 │       └── 视频标题_BV1xx.mp4
 └── ...
 ```
+
+## 用户目录注册表（改名防重下）
+
+作者改昵称后，工具不会新建目录重复下载全部作品，而是继续写入原目录增量下载。机制（`BaseEngine._resolve_user_dir()`）：
+
+1. **注册表**：`output/{platform}/_users.json` 维护 `user_id → 目录名` 映射。引擎在 `fetch_user_items` 时设置稳定用户 ID（抖音 `sec_uid`、小红书 `user_id`），`download_user` 统一经 `_resolve_user_dir` 解析目录：
+   - 注册表命中 → 复用原目录（**目录名保留首次登记的昵称**，不跟随改名更新，保证路径稳定）
+   - 注册表 miss → 指纹回绑（见下）；无匹配 → 按当前昵称新建并登记
+   - 未设置 user_id 的引擎（B站/快手/微博/X）退化为纯昵称命名（旧版行为）
+2. **指纹回绑**（覆盖存量用户，含升级前已改名、注册表无记录的情况）：注册表 miss 时扫描 `output/{platform}/` 下各子目录文件名中的 item_id（复用 `_scan_existing_items`），与本批抓到的 item_id 求交集；**交集 ≥2 且交集占该目录作品数 ≥50%（主导率）** 的目录被识别为历史目录，自动登记。主导率判定防止"目录里混放少量他人作品"的误绑；交集数优先选作品最多的目录（本人的主目录）。
+3. **加固**：注册表值校验（路径穿越/绝对路径/非字符串一律忽略并写回合法值自愈）；空昵称（抓取失败）不写注册表（防把 user_id 永久绑到 unknown 目录）；目录被删除后绑定不丢（download_user 重建同名目录）。
+4. 小红书崩溃恢复 checkpoint（`_checkpoint.json`）也走同一目录解析，改名后断点不丢。
+5. 存量迁移：没改过名的老用户下次运行时指纹命中的就是自己的旧目录，无缝登记；改名用户的旧目录由指纹自动接管（要求旧目录有 ≥2 个该作者的作品文件）。
+6. 手工方案：把旧目录改名为当前昵称后重跑，同样完成接管（注册表按当前昵称登记）。
 
 ## 重命名工具
 
@@ -155,7 +170,7 @@ output/
               ↓
               engine.fetch_single_item(video_id) → DownloadItem
               ↓
-              engine.download_user(url, items=[item])  # 复用按 nickname 创建目录 + 跳过已存在
+              engine.download_user(url, items=[item])  # 复用目录解析（单视频未设置 user_id，按昵称）+ 跳过已存在
 ```
 
 抖音 URL 识别支持 4 种格式：
@@ -216,10 +231,10 @@ output/
 ### X
 - **数据来源：拦截浏览器自身的 GraphQL 响应**（`page.on('response')`），不构造 API 请求。浏览器自己发的请求带正确的 public bearer token / ct0 / x-client-transaction-id，无硬编码 queryId / features，X 改版不受影响
 - **解析不依赖 operation 名称**：GraphQL operation 名不固定（`UserMedia` → `UserVideoTimeline` → `UserOriginalsTimeline`），引擎递归收集所有响应中含 `extended_entities` 的 tweet dict，按 `rest_id` 去重
-- **入口必须是主页** `x.com/{user}`（帖子 tab，`UserOriginalsTimeline` = 本人全部原创媒体，图+视频，天然不含转推）。**不能用 `/media`**——新版 `/media` 只是「视频」tab，纯图片作者会显示空态被误判为用户不存在
+- **入口必须是双 media 视图**：`/media`（视频）+ `/media?filter=photo`（照片），两视图各滚动到底按 `rest_id` 合并去重 = 本人全部媒体。media tab 天然只含博主自己的媒体（无转推/回复），每页 100% 媒体密度（约 19-20 条/轮）。**不能用主页帖子 tab**：`UserOriginalsTimeline` 的 "Originals" 只排除回复不排除转推，且分页混大量纯文字推文（媒体密度 ~10-20%，连续 3 轮无新增媒体会被误判到底漏抓）。另加转推防御过滤（`retweeted_status_result` / `RT @` 前缀）
 - **用户存在性由 `UserByScreenName` 响应判定**（`UserUnavailable` = 不存在/冻结），不能用 DOM 空态组件判断（原因同上）
 - **用户对象双结构兼容**：2026 改版后 `user_results.result.legacy.screen_name` → `result.core.screen_name`，`_tweet_user_info()` 兼容两种
-- 作者过滤：只收 `screen_name == 目标用户` 的推文，排除推荐/引用的他人推文；转推在 Originals 时间线本就不出现
+- 作者过滤：只收 `screen_name == 目标用户` 的推文，排除推荐/引用的他人推文；转推双重防御（结构标记 + 文本前缀）
 - Cookie：`auth_token` + `ct0`（cookies.txt 完整注入浏览器 或 `.chrome-profile` 已有登录态）；`auth_token` 是 httpOnly
 - **下载**：aiohttp 直连 twimg CDN（不带 Cookie，Referer `https://x.com/`），**需要代理**（`--proxy` 优先，否则自动读 Windows 系统代理）
 - 多视频推文拆分为多个 item（`{rest_id}_N`，标题加 `[i/n]` 序号）；图集合并为一个 item 一次下载全部原图（`name=orig`）

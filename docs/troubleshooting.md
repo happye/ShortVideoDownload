@@ -217,6 +217,16 @@ python svd.py --retry-failed
 ---
 
 
+### 抖音打印 SSL: UNEXPECTED_EOF_WHILE_READING 大段报错，但下载正常
+
+**现象**：获取作品列表阶段打印一大段 `httpx.ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol` traceback，末尾带 `请前往QA文档 https://f2.wiki/faq 查看相关帮助`，但随后列表获取和下载全部正常。
+
+**原因**：f2 库在被 import 时就会发起 msToken 生成请求（网络请求发生在 import 过程中），该请求遇到瞬时网络/代理 TLS 抖动失败。f2 内部会**静默重试**，第二次成功后一切正常——自愈型错误，无害。2026-08-30 起该噪音已被 `prefilter_f2_logging()` 抑制，正常情况下不会再看到。
+
+**解决**：无需处理。若 msToken 两次生成都失败，程序会正常报错终止（那是真网络问题，检查代理/网络后重试）。
+
+---
+
 ### f2 库 a_bogus 签名失效
 
 **现象**：抖音 API 返回空响应（HTTP 200 但无内容）
@@ -256,6 +266,14 @@ python svd.py --retry-failed
 **原因**：用户 Cookie 异常庞大（>10KB / 100+ 字段），超过 Nginx `large_client_header_buffers` 默认 8KB 限制。抖音视频/图片/封面/音乐的 CDN URL 不需要 Cookie 鉴权，仅靠 URL 临时令牌即可访问，但旧代码下载时携带完整 Cookie，反而触发 Nginx 400。
 
 **解决**：已修复，`download_item` 中下载视频/图片/封面/音乐时不发送 Cookie，仅保留 Referer + User-Agent。`fetch_user_items` / `fetch_single_item` 等 API 调用仍需要 Cookie。
+
+---
+
+### 作者改名后新目录重复下载 / 找不到以前下载的文件
+
+**现象**：作者改了昵称，再次下载时新建了一个以新昵称命名的目录，从零重新下载。
+
+**解决**（2026-08-30 起自动处理）：工具用 `output/{platform}/_users.json` 注册表按用户 ID（不随改名变化）锁定保存目录，改名后自动继续写原目录增量下载；存量旧目录通过作品指纹（item_id 交集）自动接管。若个别用户仍被新建目录（旧目录中该作者作品少于 2 个，无法指纹识别），手动把旧目录改名为当前昵称后重跑一次，之后即被注册表接管。
 
 ---
 

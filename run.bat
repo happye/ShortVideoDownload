@@ -63,6 +63,7 @@ echo     --no-desc             不保存文案
 echo     --music               保存视频原声
 echo     -m, --mode MODE       下载模式: api/cli/direct
 echo     --config FILE         配置文件路径
+echo     --retry-failed         重下失败日志中的条目
 echo.
 echo   快捷命令:
 echo     h / help              显示此帮助
@@ -73,6 +74,11 @@ echo     "https://www.douyin.com/user/MS4wLjAB..." --browser-cookie chrome
 echo     "https://www.kuaishou.com/profile/3x..." --browser-cookie chrome
 echo     "https://space.bilibili.com/123456" --browser-cookie chrome
 echo     "https://www.xiaohongshu.com/user/profile/5f..." --cookie "your_cookie"
+echo     "https://x.com/username"                    X 用户媒体
+echo     "https://x.com/username/20241201-20210506"  X 指定日期范围
+echo.
+echo   X 日期范围: URL后接 /YYYYMMDD-YYYYMMDD
+echo                 分隔符 - _ ~ 均可, 两端日期顺序不限, 范围含两端
 echo.
 echo ========================================================
 goto :eof

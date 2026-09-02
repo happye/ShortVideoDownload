@@ -23,8 +23,9 @@
 
 ### f2 库处理
 - f2 的日志有两个来源：logging 系统 + `rich_console.print()` 直接输出
-- 抑制顺序：先 import f2（触发 `log_setup()`）→ 再设 CRITICAL 级别 + monkey-patch rich_console
-- `_suppress_f2_logging()` 必须在 f2 完全 import 后调用
+- **两阶段抑制**（顺序不可颠倒）：
+  1. import f2 **之前**调用 `prefilter_f2_logging()`（挂 logging.Filter）——f2 import 时（`BaseRequestModel` 类体）就发起 msToken 网络请求，瞬时 TLS 失败打完整 traceback 后内部静默重试成功（自愈型无害错误）；f2 的 `log_setup()` 只重置 level/handler 不清 filter，预挂 filter 能穿越它；两次都失败时 import 仍正常抛错，致命错误不掩盖
+  2. import f2 **之后**调用 `suppress_f2_logging()`（设 CRITICAL 级别 + monkey-patch rich_console）
 
 ### Windows 编码
 - `svd.py` 入口设置 `SetConsoleOutputCP(65001)` + 重包装 stdout/stderr 为 UTF-8
@@ -41,7 +42,7 @@
 ### 单视频链接下载
 - `utils.detect_single_video(url)` 识别抖音 4 种 + 小红书 3 种 + B站 2 种 + X 1 种（`/{user}/status/{id}`）URL 格式
 - 引擎实现 `fetch_single_item(video_id, original_url=None)`：抖音调用 f2 的 `fetch_one_video`；小红书用 CDP 连接的真实 Chrome 访问详情页（从 `original_url` 提取 `xsec_token`）；B站调用 `view` API 拿标题/UP主（失败退化为 video_id 作标题，yt-dlp 仍可下载）；X 访问推文页拦截 `TweetDetail` 响应；快手/微博未实现 `fetch_single_item`，不支持单视频下载
-- `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用按 nickname 创建目录 + 跳过已存在 + download_item 的逻辑
+- `svd.py run_download` 中检测到单视频 URL → `fetch_single_item` → `download_user(url, items=[item])` 复用目录解析 + 跳过已存在 + download_item 的逻辑（单视频路径未设置 `user_id`，按昵称解析目录）
 
 ### B站引擎（完全基于 yt-dlp）
 - **不再自调B站 API**：旧 `x/space/arc/search`、`x/polymer/space/seasons_series_list` 已废弃返回 404；新 API 需要 wbi 签名且风控严格（频繁 -799 / 412）。yt-dlp 内部维护 API 路径和签名，跟着升级，最稳定
@@ -106,7 +107,12 @@
 
 ### X 引擎（CDP + Patchright 拦截 GraphQL）
 - **数据来源是拦截浏览器自身的 GraphQL 响应**（`page.on('response')`），绝不自己构造 API 请求。解析**不依赖 operation 名称**（X 不定期改名：`UserMedia` → `UserVideoTimeline` → `UserOriginalsTimeline`），递归收集响应中含 `extended_entities` 的 tweet dict 按 `rest_id` 去重
-- **抓取入口必须用主页** `x.com/{user}`（帖子 tab `UserOriginalsTimeline` = 本人全部原创媒体，图+视频，无转推）。**不能用 `/{user}/media`**——新版只是「视频」tab，纯图片作者显示空态会被误判用户不存在
+- **抓取入口必须用双 media 视图**：`x.com/{user}/media`（视频）+ `x.com/{user}/media?filter=photo`（照片），按 `rest_id` 合并去重 = 本人全部媒体（media tab 天然无转推/回复）。**不能用主页帖子 tab**——`UserOriginalsTimeline` 的 "Originals" 只排除回复不排除转推，且媒体密度低（纯文字推文占页，连续 3 轮无新增媒体会被误判到底漏抓）；media tab 每页 100% 媒体（约 19-20 条/轮）。防御性过滤转推：`legacy.retweeted_status_result` 存在或 `full_text` 以 "RT @" 开头即跳过
+- **断点续传**（深度滚动多年历史必备）：进度持久化 `{save_dir}/x/.checkpoint_{screen_name}.json`（7 天过期，原子写）；滚动中每 5 轮或新增 ≥50 条节流保存；视图真到底才标记 `views_done`；崩溃/Ctrl-C/429 中断后**重跑同命令自动续传**（跳过已完成视图）；干净完成删除断点文件
+- **到底判定必须用 `saw_tweets` 信号**：分页响应含目标作者推文（含重复）= 时间线仍在推进（续传回放/游标重叠），不算到底；连续 3 轮「无响应且无新增」才判到底。只看增量 delta 会把续传回放区间误判成到底而漏抓
+- **深度退避**：滚动延迟随深度递增（`+min(轮数×0.1, 4s)`），深部分页 429 风控防护；每视图新 page 释放 JS 堆（防长滚动 OOM，小红书前科）；Chrome 加 `--autoplay-policy=user-gesture-required` 禁视频预览自动播放（正常用户选项，非自动化特征）
+- **深历史搜索回补（media tab 游标墙）**：X 对 media tab 分页有服务端游标深度上限（~1500 条推文，老账号中途断流，滚动再多也不返回更早内容）。判定与破局：`UserByScreenName` 响应含 `media_count`（资料页媒体总数）+ 账号 `created_at`；不限量模式下捕获媒体数 < `media_count`×95% 时自动进入搜索回补——浏览器访问 `x.com/search?q=from:用户 filter:videos|images since:起 until:止&f=live`（**必须 f=live**，默认 Top 是策展子集），从最早已捕获推文往前 180 天窗口逐段搜到账号创建日；搜索单查询也有深度限制但 180 天窗口远低于它；SearchTimeline 响应与时间线同构，拦截器无需改动。熔断：连续 3 窗口零新增即停（media_count 含转推媒体时永远到不了 100%）；已完成查询 URL 记入断点 `views_done` 防重搜；最终输出全局按发布时间倒序
+- **日期范围参数（X 独有）**：URL 尾接 `/YYYYMMDD-YYYYMMDD`（`_parse_date_range`；分隔符 `-` `_` `~` 均可，两端顺序不限自动排序，必须真实日历日期否则报错，范围含两端）。带范围时跳过 media 视图，先探测主页（登录+存在性，`_probe_user` 闭包复用）再直搜该范围；断点键用 `{user}_rng{起}_{止}` 与全量任务隔离；显式范围模式**禁用空窗口熔断**（用户明确指定范围，空段必须继续）；窗口含端点语义：查询 `until:末尾+1天`（X until 为排他语义，不 +1 漏边界日）；抓完再按推文 UTC 日期做安全网过滤
 - **用户存在性只由 `UserByScreenName` 响应判定**（`UserUnavailable` = 不存在/冻结），**不能用 DOM `[data-testid="emptyState"]`**（会被"尚未发布视频"空态误触发）
 - **用户对象双结构**：`screen_name`/`name` 可能位于 `user_results.result.legacy` 或 `result.core`，`_tweet_user_info()` 兼容两种，取值必须走它
 - 只收 `screen_name == 目标用户` 的推文（作者过滤），排除推荐/引用的他人推文
@@ -114,13 +120,25 @@
 - **下载 twimg CDN 必须走代理**：`--proxy` 优先，否则 `utils.get_system_proxy()` 读 Windows 系统代理（Chrome 同源）；aiohttp 不会自动走系统代理
 - Cookie：`auth_token`（httpOnly）+ `ct0`；cookies.txt 用 `utils.load_netscape_cookie_dicts()` 完整注入浏览器（保留 httpOnly/secure/expires），不是拼接字符串
 
+### 用户保存目录（改名防重下）
+- 目录解析必须走 `BaseEngine._resolve_user_dir(nickname, item_ids)`，引擎不得自行拼接 `save_dir/platform/昵称`
+- `output/{platform}/_users.json` 注册表维护 `user_id → 目录名`；**目录名保留首次登记的昵称**，不跟随改名更新（保证路径稳定）
+- 引擎在 `fetch_user_items` 中设置 `self._user_id`（抖音 `sec_uid` / 小红书 `user_id`）；未设置的引擎（B站/快手/微博/X）退化为纯昵称命名（旧行为）
+- 注册表 miss 时**指纹回绑**：扫描子目录 item_id 交集，交集 ≥2 且主导率（交集/该目录作品数）≥0.5 判定为历史目录——覆盖存量用户改名场景，主导率防混放误绑
+- **空昵称（抓取失败/items 为空）不写注册表、不指纹**，返回 unknown 目录——否则会把 user_id 永久绑到 unknown（毒化）
+- 注册表值手工改坏（路径穿越/绝对路径/非字符串）会被校验忽略并写回合法值自愈
+- `_users.json` 是内部文件，不要手工编辑；删除它会使改名用户回退到指纹回绑（作品文件还在即可重新接管）
+- 小红书 checkpoint（`_checkpoint.json`）必须走 `_resolve_user_dir`，与下载目录一致
+
 ### Cookie 获取优先级
 1. `--browser-cookie` → rookiepy 提取（Firefox 正常，Chrome/Edge 受 App-Bound Encryption 限制）
 2. `cookies.txt` 文件回退（Netscape 格式，按域名自动筛选）
 3. `--cookie` 手动提供
 
 ### 去重机制
-- `_scan_existing_items()` 扫描目录，从文件名提取 item_id
+- 文件名格式：`{发布日期YYYYMMDD}_{配文前15字}_{item_id}[_NNN].ext`（B站用 yt-dlp 模板 `%(upload_date)s_%(title).15s_%(id)s.%(ext)s`）；日期前缀按时间排序追踪，配文超长截 15 字
+- 时间解析：`utils.parse_create_time()` 统一处理 epoch 秒（抖音/快手/B站）、epoch 毫秒（小红书）、ISO（X）、微博英文格式
+- `_scan_existing_items()` 扫描目录，从文件名提取 item_id（新旧格式均兼容，按 item_id 去重不受命名变化影响）
 - 抖音 item_id：≥10 位纯数字；小红书 note_id：24 位十六进制；B站 BV号 `BV[A-Za-z0-9]{10}` / av号 `av\d+`
 - `download_item()` 检查目标文件是否已存在
 - 已存在 → 返回 `skipped=True`，不下载不重命名
