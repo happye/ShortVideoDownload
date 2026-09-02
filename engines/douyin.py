@@ -11,6 +11,7 @@ import asyncio
 import logging
 import logging.handlers
 import subprocess
+import uuid
 from typing import List, Optional
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
@@ -45,6 +46,19 @@ class DouyinEngine(BaseEngine):
         if match:
             return match.group(1)
         raise ValueError(f"无法从 URL 提取抖音 sec_uid: {url}")
+
+    @staticmethod
+    def _apply_argus_headers(kwargs: dict) -> dict:
+        """注入抖音边缘网关 ArgusSecurityPlugin 要求的请求头。
+
+        2026-08 起 aweme/v1/web 列表接口强制校验 uifid / x-tt-argus,
+        缺失时翻页返回 403 Forbidden(实验验证: 注入后可完整翻页)。
+        """
+        headers = dict(kwargs.get("headers") or {})
+        headers.setdefault("uifid", uuid.uuid4().hex)
+        headers.setdefault("x-tt-argus", "0.0.1")
+        kwargs["headers"] = headers
+        return kwargs
 
     async def fetch_user_items(self, user_url: str) -> List[DownloadItem]:
         """
@@ -90,6 +104,7 @@ class DouyinEngine(BaseEngine):
         if self.config.proxies:
             proxy = self.config.proxies
             kwargs["proxies"] = {"http://": proxy, "https://": proxy}
+        self._apply_argus_headers(kwargs)
 
         handler = DouyinHandler(kwargs)
         items = []
@@ -234,6 +249,7 @@ class DouyinEngine(BaseEngine):
         if self.config.proxies:
             proxy = self.config.proxies
             kwargs["proxies"] = {"http://": proxy, "https://": proxy}
+        self._apply_argus_headers(kwargs)
 
         handler = DouyinHandler(kwargs)
 
