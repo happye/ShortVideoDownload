@@ -18,9 +18,9 @@ import re
 import json
 import random
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from engines.xiaohongshu import (
@@ -36,6 +36,8 @@ from config import DownloadConfig
 MIN_SCROLL_DELAY = 3.0
 MAX_SCROLL_DELAY = 6.0
 MAX_SCROLL_COUNT = 100
+# 深历史搜索回补的查询上限（每查询 180 天窗口 × videos/images 两类）
+MAX_SEARCH_QUERIES = 60
 
 # X 保留路径（非用户名）
 RESERVED_SCREEN_NAMES = {
@@ -250,6 +252,9 @@ class XEngine(BaseEngine):
             '--no-first-run',
             '--no-default-browser-check',
             '--mute-audio',
+            # 媒体页长时间滚动防内存膨胀：禁视频自动播放预览
+            # （chrome://flags 的正常用户选项，非自动化特征，区别于 --disable-blink-features）
+            '--autoplay-policy=user-gesture-required',
         ]
         import subprocess
         self._chrome_process = subprocess.Popen(
@@ -328,12 +333,39 @@ class XEngine(BaseEngine):
 
     # ------------------------------------------------------------------ 解析
 
+    # 日期范围参数（X 独有）：URL 后接 /YYYYMMDD-YYYYMMDD
+    # 分隔符 - _ ~ 均可，两端日期顺序不限（自动排序），范围含两端。
+    # 例：https://x.com/{user}/20241201-20210506 → 2021-05-06 ~ 2024-12-01
+    _DATE_RANGE_RE = re.compile(r'/(\d{8})([-_~])(\d{8})/?$')
+
+    @classmethod
+    def _parse_date_range(cls, url: str):
+        """解析 URL 尾部的日期范围参数，返回 (start, end)（已排序，date 对象，含端点）；
+        无参数返回 None；日期非真实日历日期抛 ValueError"""
+        path = url.split('?')[0]
+        m = cls._DATE_RANGE_RE.search(path)
+        if not m:
+            return None
+
+        def _to_date(s: str):
+            try:
+                return datetime.strptime(s, '%Y%m%d').date()
+            except ValueError:
+                raise ValueError(
+                    f"日期范围参数无效: {m.group(1)}{m.group(2)}{m.group(3)}"
+                    f"（{s} 不是真实日期，格式 YYYYMMDD，如 20241201-20210506）")
+
+        d1, d2 = _to_date(m.group(1)), _to_date(m.group(3))
+        return (d1, d2) if d1 <= d2 else (d2, d1)
+
     def _extract_screen_name(self, url: str) -> str:
         """从 URL 提取 X 用户名（screen_name）"""
         path = url.split('?')[0].rstrip('/')
         # 单推 URL 不支持走用户主页流程
         if re.search(r'(?:x|twitter)\.com/[^/]+/status/\d+', path):
             raise ValueError(f"这是单条推文链接，请提供用户主页 URL: {url}")
+        # 剥离日期范围参数段（/20241201-20210506）再匹配用户名
+        path = re.sub(r'/\d{8}[-_~]\d{8}$', '', path)
         m = re.search(r'(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})$', path)
         if m and m.group(1).lower() not in RESERVED_SCREEN_NAMES:
             return m.group(1)
@@ -417,11 +449,210 @@ class XEngine(BaseEngine):
             ))
         return items
 
+    # ------------------------------------------------------------------ 断点续传
+    # 深度滚动（多年历史、数百条媒体）耗时长，中途崩溃/ Ctrl-C / 429 风控会丢失全部
+    # 已捕获推文。断点持久化到 {save_dir}/x/.checkpoint_{screen_name}.json，
+    # 重跑同一命令即自动续传（跳过已完成视图，未完成视图从顶部重放，靠去重+回放检测续上）。
+
+    def _checkpoint_path(self, screen_name: str) -> str:
+        d = os.path.join(self.config.save_dir, 'x')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, f'.checkpoint_{screen_name.lower()}.json')
+
+    def _load_checkpoint(self, screen_name: str) -> dict:
+        """读取断点（7 天过期；不存在/损坏返回空 dict）"""
+        import time
+        path = self._checkpoint_path(screen_name)
+        try:
+            if not os.path.isfile(path):
+                return {}
+            if time.time() - os.path.getmtime(path) > 7 * 24 * 3600:
+                os.remove(path)
+                return {}
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict) \
+                    or data.get('screen_name', '').lower() != screen_name.lower():
+                return {}
+            return data
+        except Exception:
+            return {}
+
+    def _save_checkpoint(self, screen_name: str, tweets: dict, views_done: set):
+        """原子保存断点（tmp + replace）；调用方负责节流"""
+        try:
+            path = self._checkpoint_path(screen_name)
+            tmp = path + '.tmp'
+            payload = {
+                'screen_name': screen_name,
+                'tweets': tweets,
+                'views_done': sorted(views_done),
+                'updated_at': datetime.now().isoformat(timespec='seconds'),
+            }
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            self._log(f"  ⚠ 断点保存失败（不影响本次抓取）: {e}")
+
+    def _delete_checkpoint(self, screen_name: str):
+        try:
+            path = self._checkpoint_path(screen_name)
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _media_total(tweets: dict) -> int:
+        """推文集合的媒体文件总数（照片+视频各算 1）"""
+        return sum(
+            len(((t.get('legacy') or {}).get('extended_entities') or {}).get('media') or [])
+            for t in tweets.values()
+        )
+
+    async def _search_backfill(self, context, on_response, captured: dict,
+                               screen_name: str, sources_done: set,
+                               range_start=None, range_end=None, cp_key: str = None):
+        """深历史搜索回补：media tab 游标深度用尽（~1500 条）后，
+        用搜索日期窗口（f=live，倒序全量）继续挖更早的媒体。
+
+        - 自动模式（默认）：窗口从已捕获最早推文往前 180 天一段，直到账号创建时间
+        - 显式范围模式（range_start/range_end 给定，来自 URL 日期参数）：
+          窗口覆盖 [range_start, range_end]（含两端），不依赖已有捕获，
+          且禁用空窗口熔断（用户明确指定了范围，空段是正常情况）
+        - 窗口切分按含端点语义：查询用 until:末尾+1天（X until 为排他语义，
+          不 +1 会漏掉边界日当天的推文）
+        - 每窗口两查：filter:videos / filter:images（搜索单查询也有深度限制，
+          180 天窗口通常远低于该限制）
+        - 拦截器复用：SearchTimeline 响应与时间线响应同构，递归解析不挑 operation
+        - 熔断（仅自动模式）：连续 3 个窗口零新增即停（media_count 可能含转推媒体，
+          永远到不了 100%，防止空转）
+        """
+        from utils import parse_create_time
+
+        cp_key = cp_key or screen_name
+
+        if range_start is not None and range_end is not None:
+            end = range_end
+            lower_d = range_start
+        else:
+            oldest = None
+            for t in captured['tweets'].values():
+                dt = parse_create_time(_parse_created_at(
+                    (t.get('legacy') or {}).get('created_at', '')))
+                if dt and (oldest is None or dt < oldest):
+                    oldest = dt
+            if oldest is None:
+                return
+            lower = parse_create_time(_parse_created_at(captured.get('user_created_at') or ''))
+            if lower is None:
+                lower = oldest - timedelta(days=3650)
+            end = oldest.date()
+            lower_d = lower.date()
+
+        queries = 0
+        empty_windows = 0
+        while end >= lower_d and queries < MAX_SEARCH_QUERIES and not captured['stop']:
+            start = max(lower_d, end - timedelta(days=179))
+            until_param = end + timedelta(days=1)  # X until: 排他语义，+1 天才含端点
+            before_total = len(captured['tweets'])
+
+            for kind in ('videos', 'images'):
+                if captured['stop']:
+                    break
+                q = (f"from:{screen_name} filter:{kind} "
+                     f"since:{start.isoformat()} until:{until_param.isoformat()}")
+                url = 'https://x.com/search?q=' + quote(q) + '&f=live'
+                if url in sources_done:
+                    continue
+                queries += 1
+                if queries > MAX_SEARCH_QUERIES:
+                    break
+
+                page = await context.new_page()
+                page.on('response', on_response)
+                self._log(f"  [搜索] {q}")
+                try:
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    if '/login' in page.url:
+                        raise RuntimeError('X 登录态失效（搜索被重定向到登录页），'
+                                           '请重新登录后用断点续传重跑')
+                    await page.wait_for_timeout(3000)
+
+                    rounds = 0
+                    empty = 0
+                    while rounds < MAX_SCROLL_COUNT and not captured['stop']:
+                        rounds += 1
+                        # 深度退避同主流程
+                        delay = random.uniform(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY) \
+                            + min(rounds * 0.1, 4.0)
+                        await asyncio.sleep(delay)
+
+                        before = len(captured['tweets'])
+                        captured['saw_tweets'] = False
+                        remaining = await page.evaluate(
+                            'document.body.scrollHeight - window.innerHeight - window.scrollY')
+                        while remaining > 0:
+                            step = random.randint(300, 700)
+                            await page.mouse.wheel(0, step)
+                            await asyncio.sleep(0.05 + random.random() * 0.1)
+                            remaining -= step
+                        await page.wait_for_timeout(2500)
+
+                        if captured['stop']:
+                            break
+                        if len(captured['tweets']) > before or captured['saw_tweets']:
+                            empty = 0
+                            if rounds % 5 == 0:
+                                self._save_checkpoint(cp_key, captured['tweets'], sources_done)
+                            continue
+                        # 补滚 + 长等待再判空（同主流程）
+                        await page.mouse.wheel(0, random.randint(500, 900))
+                        await page.wait_for_timeout(4000)
+                        if len(captured['tweets']) > before or captured['saw_tweets']:
+                            empty = 0
+                            continue
+                        empty += 1
+                        if empty >= 3:
+                            break
+                finally:
+                    try:
+                        page.remove_listener('response', on_response)
+                    except Exception:
+                        pass
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+                if captured['stop']:
+                    break
+                sources_done.add(url)
+                self._save_checkpoint(cp_key, captured['tweets'], sources_done)
+
+            window_new = len(captured['tweets']) - before_total
+            self._log(f"  [搜索] 窗口 {start} ~ {end} 完成，新增 {window_new} 条"
+                      f"（累计 {len(captured['tweets'])}）")
+            # 空窗口熔断仅自动模式启用（显式范围时空段是正常情况，必须继续）
+            if range_start is None and window_new == 0:
+                empty_windows += 1
+                if empty_windows >= 3:
+                    self._log("  [搜索] 连续 3 个窗口无新增，更早历史已挖完")
+                    break
+            else:
+                empty_windows = 0
+            end = start - timedelta(days=1)  # 含端点切分：下一窗口从本窗口起点前一日开始
+
     # ------------------------------------------------------------------ 抓取
 
     async def fetch_user_items(self, user_url: str) -> List[DownloadItem]:
-        """获取 X 用户媒体列表：访问 /{user}/media 页，拦截 UserMedia GraphQL 响应"""
+        """获取 X 用户媒体列表：双视图访问 /media（视频）+ /media?filter=photo（照片），
+        拦截 GraphQL 响应合并去重，只收博主自己的原创媒体（无转推/回复）。
+        URL 尾部可带日期范围参数 /YYYYMMDD-YYYYMMDD（分隔符 - _ ~ 均可，顺序不限，
+        含两端）：带范围时跳过 media 视图，直接用搜索日期窗口抓取该范围"""
         screen_name = self._extract_screen_name(user_url)
+        date_range = self._parse_date_range(user_url)
 
         effective_max = self.config.max_count
         if effective_max == 0:
@@ -429,13 +660,32 @@ class XEngine(BaseEngine):
         else:
             self._log(f"  限制下载 {effective_max} 个")
 
+        # 断点键：日期范围模式用独立键，避免与全量任务的断点互相覆盖/误删
+        cp_key = screen_name
+        if date_range:
+            cp_key = (f"{screen_name}_rng{date_range[0]:%Y%m%d}"
+                      f"_{date_range[1]:%Y%m%d}")
+            self._log(f"  日期范围模式: {date_range[0]} ~ {date_range[1]}（含两端，只下此范围）")
+
         context = await self._new_context()
-        page = await context.new_page()
 
         # 拦截器必须在 goto 之前注册（首屏请求在 goto 期间发出）
         # 不依赖 operation 名称：解析所有 GraphQL 响应，递归收集含媒体的目标用户推文
         # user_state 由 UserByScreenName 响应判定（User=存在 / UserUnavailable|空=不存在或冻结）
-        captured = {'tweets': {}, 'stop': False, 'error': '', 'ops': set(), 'user_state': ''}
+        # saw_tweets：本轮滚动分页是否有目标作者推文响应——区分「续传回放/游标重叠」与「真到底」，
+        # 否则续传后重放已捕获区间 delta=0，会被「连续 3 轮无新增」误判到底而漏抓
+        captured = {
+            'tweets': {}, 'stop': False, 'error': '', 'ops': set(),
+            'user_state': '', 'saw_tweets': False,
+        }
+
+        # 断点续传：上次中断（崩溃/Ctrl-C/风控 429）的进度，重跑同命令自动接续
+        checkpoint = self._load_checkpoint(cp_key)
+        views_done = set(checkpoint.get('views_done', []))
+        if checkpoint.get('tweets'):
+            captured['tweets'].update(checkpoint['tweets'])
+            done_desc = f"{len(views_done)} 个" if views_done else "无"
+            self._log(f"  检测到断点，续传：已有 {len(captured['tweets'])} 条推文（已完成视图: {done_desc}）")
 
         async def on_response(response):
             if captured['stop'] or '/i/api/graphql/' not in response.url:
@@ -461,51 +711,62 @@ class XEngine(BaseEngine):
                     captured['user_state'] = 'unavailable'
                 elif user_result.get('__typename') == 'User':
                     captured['user_state'] = 'ok'
+                    # 深历史判定素材：资料页媒体总数 + 账号创建时间
+                    # （media tab 游标深度 ~1500 条，捕获量 < media_count 时需搜索回补）
+                    core = user_result.get('core') or {}
+                    leg = user_result.get('legacy') or {}
+                    mc = core.get('media_count') or leg.get('media_count')
+                    if mc and not captured.get('media_count'):
+                        captured['media_count'] = int(mc)
+                    ca = core.get('created_at') or leg.get('created_at') or ''
+                    if ca and not captured.get('user_created_at'):
+                        captured['user_created_at'] = ca
             found = {}
             _find_all_tweets(data, found)
             added = 0
+            saw = False
             for rid, tweet in found.items():
-                if rid in captured['tweets']:
-                    continue
                 # 只收目标用户的推文（排除时间线里推荐/引用的他人推文）
                 if _tweet_author_screen_name(tweet) != screen_name.lower():
                     continue
+                # 防御性排除转推：RT 的原推作者可能被误判（结构变化），
+                # 双保险看结构标记 + "RT @" 文本前缀
+                legacy = tweet.get('legacy') or {}
+                if legacy.get('retweeted_status_result') is not None:
+                    continue
+                if (legacy.get('full_text') or '').startswith('RT @'):
+                    continue
+                # 分页有目标作者推文（含重复）→ 时间线仍在推进，不是到底
+                saw = True
+                if rid in captured['tweets']:
+                    continue
                 captured['tweets'][rid] = tweet
                 added += 1
+            if saw:
+                captured['saw_tweets'] = True
             if added:
                 m = re.search(r'/graphql/[^/]+/(\w+)', response.url)
                 if m:
                     captured['ops'].add(m.group(1))
                 self._log(f"  拦截到 {added} 条推文（累计 {len(captured['tweets'])}）")
 
-        page.on('response', on_response)
-
-        try:
-            # 主页「帖子」tab：X 新版 /media 只是「视频」tab（纯图作者会被误判无媒体），
-            # 帖子 tab 的 UserOriginalsTimeline 包含本人全部原创媒体（图+视频，不含转推）
-            profile_url = f"https://x.com/{screen_name}"
-            self._log(f"  访问 {profile_url} ...")
-            try:
-                await page.goto(profile_url, wait_until='domcontentloaded', timeout=30000)
-            except Exception as e:
-                self._log(f"  页面加载警告: {e}")
-            await page.wait_for_timeout(3000)
-
-            # 登录检测：侧边栏账号按钮存在 = 已登录（X 未登录时无法看用户媒体时间线）
+        async def _probe_user(pg):
+            """登录检测 + 用户存在性判定（访问任一 x.com 页面后调用；
+            登录看侧边栏账号按钮，存在性等 UserByScreenName 响应，最长 10s）"""
             logged_in = False
             for _ in range(6):
-                count = await page.locator(
+                count = await pg.locator(
                     '[data-testid="SideNav_AccountSwitcher_Button"]'
                 ).count()
                 if count > 0:
                     logged_in = True
                     break
-                login_wall = await page.locator(
+                login_wall = await pg.locator(
                     'input[autocomplete="username"]'
                 ).count()
-                if login_wall > 0 or '/login' in page.url:
+                if login_wall > 0 or '/login' in pg.url:
                     break
-                await page.wait_for_timeout(1500)
+                await pg.wait_for_timeout(1500)
 
             if not logged_in:
                 raise RuntimeError(
@@ -517,55 +778,181 @@ class XEngine(BaseEngine):
                     "  3. 使用 --cookie \"auth_token=xxx; ct0=xxx\" 参数"
                 )
 
-            # 用户存在性：等待 UserByScreenName 响应（权威判定，最长 10s）
-            # 注意不能用 DOM 空态组件判断——纯图片作者的 /media「视频」tab 也会显示空态
+            # 用户存在性：等待 UserByScreenName 响应（权威判定）
             for _ in range(10):
                 if captured['user_state'] or captured['stop']:
                     break
-                await page.wait_for_timeout(1000)
+                await pg.wait_for_timeout(1000)
 
             if captured['user_state'] == 'unavailable':
                 raise RuntimeError(f"用户 @{screen_name} 不存在或已被冻结")
 
-            # 滚动加载更多（真实鼠标滚轮，随机节奏）
-            scroll_count = 0
-            consecutive_empty = 0
-            while (len(captured['tweets']) < effective_max
-                   and scroll_count < MAX_SCROLL_COUNT and not captured['stop']):
-                scroll_count += 1
-                delay = random.uniform(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY)
-                self._log(f"  滚动加载第 {scroll_count} 次，等待 {delay:.1f}s ...")
-                await asyncio.sleep(delay)
+        page = None
+        try:
+            if date_range:
+                # 日期范围模式：跳过 media 视图（其不支持日期过滤），
+                # 探测主页（登录+存在性）后直接用搜索日期窗口抓取指定范围
+                page = await context.new_page()
+                page.on('response', on_response)
+                self._log("  访问主页确认登录与用户 ...")
+                try:
+                    await page.goto(f"https://x.com/{screen_name}",
+                                    wait_until='domcontentloaded', timeout=30000)
+                except Exception as e:
+                    self._log(f"  页面加载警告: {e}")
+                await page.wait_for_timeout(3000)
+                await _probe_user(page)
 
-                before_count = len(captured['tweets'])
-                scroll_y = await page.evaluate('window.scrollY')
-                total_height = await page.evaluate('document.body.scrollHeight')
-                viewport_h = await page.evaluate('window.innerHeight')
-                remaining = total_height - viewport_h - scroll_y
-                while remaining > 0:
-                    step = random.randint(300, 700)
-                    await page.mouse.wheel(0, step)
-                    await asyncio.sleep(0.05 + random.random() * 0.1)
-                    remaining -= step
-                await page.wait_for_timeout(2500)
+                await self._search_backfill(
+                    context, on_response, captured, screen_name, views_done,
+                    range_start=date_range[0], range_end=date_range[1],
+                    cp_key=cp_key)
+                media_views = []  # 跳过下方 media 视图循环
+            else:
+                # 双视图抓取（media tab 天然只含博主自己的媒体，无转推/回复）：
+                #   /media               → 视频视图（新版默认 tab 只有视频）
+                #   /media?filter=photo  → 照片视图（纯图推文）
+                # 两视图合并去重（按 rest_id）= 博主全部原创媒体。
+                # 注意不能用主页「帖子」tab：其 UserOriginalsTimeline 的 "Originals"
+                # 只排除回复不排除转推，且分页混大量纯文字推文（媒体密度低，滚动效率差）。
+                media_views = [
+                    f"https://x.com/{screen_name}/media",
+                    f"https://x.com/{screen_name}/media?filter=photo",
+                ]
 
-                if captured['stop']:
-                    break
+            for view_idx, view_url in enumerate(media_views, 1):
+                # 断点续传：上次已滚到底的视图直接跳过（其推文已全部在断点里）
+                if view_url in views_done:
+                    self._log(f"  [视图{view_idx}] 上次已完成，跳过")
+                    continue
                 if len(captured['tweets']) >= effective_max:
                     break
 
-                # 本轮无新增推文 → 可能到底（连续 3 轮确认，X 虚拟列表页高会持续增长，
-                # 页高不可作为到底依据，只看推文增量）
-                if len(captured['tweets']) == before_count:
+                # 每视图新 page：关闭旧页释放 JS 堆（深度滚动内存累积，小红书曾 140+ 笔记 OOM）
+                if page is not None:
+                    try:
+                        page.remove_listener('response', on_response)
+                    except Exception:
+                        pass
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                page = await context.new_page()
+                page.on('response', on_response)
+
+                self._log(f"  访问 {view_url} ...")
+                try:
+                    await page.goto(view_url, wait_until='domcontentloaded', timeout=30000)
+                except Exception as e:
+                    self._log(f"  页面加载警告: {e}")
+                await page.wait_for_timeout(3000)
+
+                # 登录检测 + 用户存在性（仅第一轮）
+                if view_idx == 1:
+                    await _probe_user(page)
+
+                # 滚动加载当前视图（真实鼠标滚轮，随机节奏）
+                scroll_count = 0
+                consecutive_empty = 0
+                saved_count = len(captured['tweets'])  # 上次写断点时的数量（节流）
+                view_bottom = False
+                while (len(captured['tweets']) < effective_max
+                       and scroll_count < MAX_SCROLL_COUNT and not captured['stop']):
+                    scroll_count += 1
+                    # 深度退避：越往下翻分页越密集，逐渐放慢降低 429 风控风险（最多 +4s）
+                    delay = random.uniform(MIN_SCROLL_DELAY, MAX_SCROLL_DELAY) \
+                        + min(scroll_count * 0.1, 4.0)
+                    self._log(f"  [视图{view_idx}] 滚动第 {scroll_count} 次，等待 {delay:.1f}s ...")
+                    await asyncio.sleep(delay)
+
+                    before_count = len(captured['tweets'])
+                    captured['saw_tweets'] = False
+                    scroll_y = await page.evaluate('window.scrollY')
+                    total_height = await page.evaluate('document.body.scrollHeight')
+                    viewport_h = await page.evaluate('window.innerHeight')
+                    remaining = total_height - viewport_h - scroll_y
+                    while remaining > 0:
+                        step = random.randint(300, 700)
+                        await page.mouse.wheel(0, step)
+                        await asyncio.sleep(0.05 + random.random() * 0.1)
+                        remaining -= step
+                    await page.wait_for_timeout(2500)
+
+                    if captured['stop']:
+                        break
+                    if len(captured['tweets']) >= effective_max:
+                        break
+
+                    if len(captured['tweets']) > before_count:
+                        consecutive_empty = 0
+                        # 节流写断点（每 5 轮或新增 ≥50）：丢了的部分可在续传回放中重新捕获
+                        if scroll_count % 5 == 0 \
+                                or len(captured['tweets']) - saved_count >= 50:
+                            self._save_checkpoint(screen_name, captured['tweets'], views_done)
+                            saved_count = len(captured['tweets'])
+                        continue
+
+                    if captured['saw_tweets']:
+                        # 分页有响应但全是已捕获推文（断点续传回放 / 游标重叠区间）
+                        # → 时间线仍在推进，不是到底
+                        consecutive_empty = 0
+                        continue
+
+                    # 无响应也无新增：可能分页慢——补一次滚动 + 更长等待再判定
+                    await page.mouse.wheel(0, random.randint(500, 900))
+                    await page.wait_for_timeout(4000)
+                    if len(captured['tweets']) > before_count or captured['saw_tweets']:
+                        consecutive_empty = 0
+                        continue
+
+                    # 连续 3 轮确认到底（X 虚拟列表页高持续增长，页高不可作为到底依据）
                     consecutive_empty += 1
                     if consecutive_empty >= 3:
-                        self._log("  连续 3 次滚动无新推文，已到底部")
+                        self._log(f"  [视图{view_idx}] 连续 3 次滚动无新推文，视图到底")
+                        view_bottom = True
                         break
-                else:
-                    consecutive_empty = 0
+
+                # 真正滚到底（非风控/非轮数上限中断）→ 标记完成并写断点
+                if view_bottom and not captured['stop']:
+                    views_done.add(view_url)
+                    self._save_checkpoint(screen_name, captured['tweets'], views_done)
+
+            # 深历史回补：X 对 media tab 有服务端游标深度限制（~1500 条推文，
+            # 老账号会中途断流），资料页 media_count 明显大于捕获量时用搜索日期窗口继续挖
+            # （仅全量模式；日期范围模式已直接用搜索覆盖指定范围，无需此判定）
+            if (not date_range and effective_max >= 10**9 and not captured['stop']
+                    and captured.get('media_count') and captured['tweets']):
+                have = self._media_total(captured['tweets'])
+                want = captured['media_count']
+                self._log(f"  媒体覆盖: {have}/{want}（资料页计数）")
+                if have < want * 0.95:
+                    self._log("  media tab 游标已到深度上限，切换搜索模式回补更早历史 ...")
+                    await self._search_backfill(context, on_response, captured,
+                                                screen_name, views_done)
 
             if captured['error']:
                 self._log(f"  ⚠ 检测到风控/错误，停止抓取以保护账号: {captured['error']}")
+                self._log("  进度已存断点，稍后重跑同一命令可续传")
+
+            # 干净完成（无风控/错误）→ 清除断点文件；中断场景保留供下次续传
+            if not captured['stop']:
+                self._delete_checkpoint(cp_key)
+
+            # 日期范围模式：安全网过滤（探测页可能顺带捕获范围外的最新推文）
+            if date_range:
+                from utils import parse_create_time as _pct
+                rs, re_ = date_range
+
+                def _in_range(t: dict) -> bool:
+                    dt = _pct(_parse_created_at(
+                        (t.get('legacy') or {}).get('created_at', '')))
+                    return dt is not None and rs <= dt.date() <= re_
+                before_n = len(captured['tweets'])
+                captured['tweets'] = {rid: t for rid, t in captured['tweets'].items()
+                                      if _in_range(t)}
+                self._log(f"  范围过滤: {before_n} → {len(captured['tweets'])} 条"
+                          f"（{rs} ~ {re_}，含两端，UTC 日期）")
 
             self._log(f"  共拦截 {len(captured['tweets'])} 条含媒体推文"
                       + (f"（operation: {', '.join(sorted(captured['ops']))}）" if captured['ops'] else ""))
@@ -574,18 +961,26 @@ class XEngine(BaseEngine):
             items = []
             for tweet in captured['tweets'].values():
                 items.extend(self._tweet_to_items(tweet))
+            # 全局按发布时间倒序（来源混合：media 视图 + 搜索回补，插入序无意义）
+            from utils import parse_create_time
+
+            def _sort_key(i):
+                dt = parse_create_time(i.create_time)
+                return (dt is None, -dt.timestamp() if dt else 0.0)
+            items.sort(key=_sort_key)
             # 时间线倒序（最新在前）已是 X 默认顺序
             return items[:effective_max] if effective_max < 10**9 else items
 
         finally:
-            try:
-                page.remove_listener('response', on_response)
-            except Exception:
-                pass
-            try:
-                await page.close()
-            except Exception:
-                pass
+            if page is not None:
+                try:
+                    page.remove_listener('response', on_response)
+                except Exception:
+                    pass
+                try:
+                    await page.close()
+                except Exception:
+                    pass
             await self._close_browser()
 
     async def fetch_single_item(self, video_id: str, original_url: str = None) -> Optional[DownloadItem]:
