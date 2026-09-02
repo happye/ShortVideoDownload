@@ -348,9 +348,9 @@ class BilibiliEngine(BaseEngine):
             }
             fmt = quality_map.get(self.config.quality, "bestvideo+bestaudio/best")
 
-            # 用 yt-dlp 模板命名：真实标题_BV号.mp4
-            # yt-dlp 获取真实标题，BV 号后缀用于扫描去重
-            output_template = os.path.join(save_dir, "%(title)s_%(id)s.%(ext)s")
+            # 用 yt-dlp 模板命名：发布日期_真实标题前15字_BV号.mp4
+            # yt-dlp 获取真实标题和发布日期（upload_date 为 YYYYMMDD），BV 号后缀用于扫描去重
+            output_template = os.path.join(save_dir, "%(upload_date)s_%(title).15s_%(id)s.%(ext)s")
 
             cmd = [
                 "yt-dlp",
