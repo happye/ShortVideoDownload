@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-短视频平台用户作品批量下载工具。多套引擎：抖音用 f2 库，小红书/X 用 Chrome CDP + Patchright，B站纯 yt-dlp，快手/微博用自研 API + yt-dlp。
+短视频平台用户作品批量下载工具。多套引擎：抖音用 f2 库，小红书/X 用 Chrome CDP + Patchright，B站纯 yt-dlp，快手/微博用自研 API + aiohttp 直接下载。
 
 ## 关键规则
 

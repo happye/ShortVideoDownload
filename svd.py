@@ -45,7 +45,7 @@ if sys.platform == "win32":
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import DownloadConfig, PLATFORM_PATTERNS
-from utils import detect_platform, extract_user_id, format_file_size
+from utils import detect_platform, extract_user_id, format_file_size, ytdlp_cmd
 from engines import ENGINES
 
 try:
@@ -646,11 +646,11 @@ def check_dependencies():
     """检查依赖是否安装"""
     missing = []
 
-    # 检查 yt-dlp
+    # 检查 yt-dlp（venv 内模块优先，PATH 兜底，见 utils.ytdlp_cmd）
     import subprocess
     try:
         subprocess.run(
-            ["yt-dlp", "--version"],
+            [*ytdlp_cmd(), "--version"],
             capture_output=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -687,21 +687,38 @@ def check_dependencies():
             print("请运行: pip install -r requirements.txt")
         sys.exit(1)
 
-    # 自动更新 yt-dlp（参考 VideoSummarize 项目的做法）
+    # yt-dlp 更新检查
+    # `yt-dlp -U` 仅对二进制发行版（exe 等）有效；pip 安装的版本会打印
+    # "Current/Latest version" 对比但从不真正升级（误导）。pip 场景改为
+    # 打印当前版本 + 手动升级命令，不再每次启动发网络请求。
     try:
-        if RICH_AVAILABLE:
-            console.print("[dim]正在检查 yt-dlp 更新...[/dim]")
+        import importlib.util
+        pip_managed = importlib.util.find_spec("yt_dlp") is not None
+        if pip_managed:
+            # pip 安装（venv 绑定，见 utils.ytdlp_cmd）：显示版本即可，升级走 pip
+            result = subprocess.run(
+                [*ytdlp_cmd(), "--version"], capture_output=True, timeout=10,
+            )
+            version = result.stdout.decode('utf-8', errors='replace').strip()
+            if RICH_AVAILABLE:
+                console.print(f"[dim]yt-dlp: {version}（升级: pip install -U yt-dlp）[/dim]")
+            else:
+                print(f"yt-dlp: {version}（升级: pip install -U yt-dlp）")
         else:
-            print("正在检查 yt-dlp 更新...")
-        result = subprocess.run(
-            ["yt-dlp", "-U"],
-            capture_output=True, timeout=60,
-        )
-        output = result.stdout.decode('utf-8', errors='replace').strip()
-        if output and RICH_AVAILABLE:
-            console.print(f"[dim]{output}[/dim]")
+            # 二进制发行版：-U 可真正自更新
+            if RICH_AVAILABLE:
+                console.print("[dim]正在检查 yt-dlp 更新...[/dim]")
+            else:
+                print("正在检查 yt-dlp 更新...")
+            result = subprocess.run(
+                ["yt-dlp", "-U"],
+                capture_output=True, timeout=60,
+            )
+            output = result.stdout.decode('utf-8', errors='replace').strip()
+            if output and RICH_AVAILABLE:
+                console.print(f"[dim]{output}[/dim]")
     except Exception:
-        pass  # 更新失败不影响使用
+        pass  # 更新检查失败不影响使用
 
 
 def main():

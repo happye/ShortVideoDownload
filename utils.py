@@ -9,6 +9,24 @@ from datetime import datetime
 from pathlib import Path
 
 
+def ytdlp_cmd() -> list:
+    """
+    返回 yt-dlp 命令前缀（绑定当前解释器环境，优先以模块方式调用）
+
+    使用 `sys.executable -m yt_dlp` 而非 PATH 里的 `yt-dlp`：
+    - 环境隔离：跟随 venv 内 pip 安装的版本，不受全局 Python / PATH 干扰
+      （PATH 上的 yt-dlp 可能来自全局环境，版本不可控且 `yt-dlp -U` 对
+      pip 安装无效，曾经导致"检查更新"形同虚设）
+    - 跨机器稳定：换机器只需 venv 内 pip install，无需全局安装
+    - venv 未安装时兜底回退 PATH（兼容二进制发行版场景）
+    """
+    try:
+        import yt_dlp  # noqa: F401
+        return [sys.executable, "-m", "yt_dlp"]
+    except ImportError:
+        return ["yt-dlp"]
+
+
 def sanitize_filename(name: str, max_length: int = 200) -> str:
     """
     清理文件名，移除非法字符，截断过长的名字
@@ -397,7 +415,7 @@ def _extract_cookies_via_ytdlp(browser: str, domain: str) -> str:
         test_url = f"https://www.{domain}/"
 
         cmd = [
-            "yt-dlp",
+            *ytdlp_cmd(),
             "--cookies-from-browser", browser,
             "--cookies", cookie_file,
             "--skip-download",

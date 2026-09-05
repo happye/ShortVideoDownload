@@ -2,6 +2,20 @@
 
 ## 修改记录
 
+### 2026-09-05 yt-dlp 升级 2026.08.19 + venv 绑定（修复假更新与全局版劫持）
+
+- **背景**：用户要求调研 yt-dlp 更新（2026.07.04 → 2026.08.19，changelog 无 B站/快手/微博条目，对项目零直接影响）并批准升级 + 修复假更新提示
+- **排查发现的两个隐患**：
+  1. `svd.py` 每次启动跑 `yt-dlp -U`，但该命令**仅对二进制发行版有效**，pip 安装只会打印 "Current/Latest version" 对比从不真正升级——"检查更新"形同虚设
+  2. **实际下载用的不是 venv 的 yt-dlp**：引擎调用 `["yt-dlp", ...]` 走 PATH 解析，PATH 上是全局 Python312 的 yt-dlp（也是 pip 装的，版本失控），venv 里装的版本从未被使用过，README 的"环境隔离"名存实亡
+- **修复**：
+  1. `utils.ytdlp_cmd()`：返回 `[sys.executable, "-m", "yt_dlp"]`（绑定 venv 解释器，venv 未装时兜底回退 PATH）。调用点全部改走它：`bilibili.py` 列表/下载 ×2、`utils.py` Cookie 导出、`svd.py` 依赖检查
+  2. `svd.py` 更新检查重构：pip 场景（`find_spec("yt_dlp")` 可导入）只显示当前版本 + 升级提示 `pip install -U yt-dlp`，不再每次启动发网络请求；二进制场景保留 `-U` 自更新
+  3. venv 内 yt-dlp 升级 2026.07.04 → 2026.08.19
+- **归因插曲（防误导）**：升级后首测报 `KeyError('bvid')`，疑似升级回归；对照实验（07.04 / 08.19 × 同 URL）证明两版行为一致——README 示例视频 BV1WV3g6eE9z 本身已失效（API 响应缺 bvid 字段），换有效 BV 后两版均正常
+- **认知修正**：快手/微博注释写"yt-dlp 下载"已过时，实际是 aiohttp 自研下载；yt-dlp 真实使用点只有 B站（列表+下载）和 utils Cookie 导出
+- **验证**：B站列表 flat-playlist（5 视频）+ 单视频全链路下载混流（18.1MB）+ 跨版本文件名去重兼容（07.04 下载的文件被 08.19 命名规则命中跳过）全部通过，启动输出变为 `yt-dlp: 2026.08.19（升级: pip install -U yt-dlp）`
+
 ### 2026-09-02 抖音列表接口 403（ArgusSecurityPlugin 新增头校验）
 
 - **现象**：获取作品列表报 `HTTP状态码错误： Status Code: 403` 或翻页中途失败（f2 上游 issue #443 同源，"下载两页后 403"）

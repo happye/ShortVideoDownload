@@ -15,7 +15,7 @@
 - 环境隔离：独立 venv 虚拟环境，不影响系统 Python
 - Cookie 提取：支持从浏览器自动提取 Cookie（推荐 Firefox）
 - cookies.txt 支持：支持 Netscape 格式的 Cookie 文件
-- 自动更新：每次运行自动检查 yt-dlp 更新
+- 自动更新：每次运行显示 yt-dlp 版本（升级命令：`pip install -U yt-dlp`）
 
 ## 支持平台
 
@@ -230,5 +230,5 @@ ShortVideoDownload/
 - Cookie 属于敏感信息，请勿泄露
 - 所有依赖在 venv 虚拟环境中，不影响系统 Python
 - Chrome/Edge 浏览器因 App-Bound Encryption 限制，推荐使用 Firefox 或 cookies.txt 文件
-- 程序每次运行会自动检查 yt-dlp 更新
+- 程序每次运行显示 yt-dlp 版本；升级用 `pip install -U yt-dlp`
 - 详细问题记录请查看 [ISSUES.md](ISSUES.md)

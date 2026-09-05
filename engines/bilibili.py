@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from engines.base import BaseEngine, DownloadItem, DownloadResult
 from config import DownloadConfig
+from utils import ytdlp_cmd
 
 
 class BilibiliEngine(BaseEngine):
@@ -236,9 +237,9 @@ class BilibiliEngine(BaseEngine):
         """
         uid = self._extract_uid(user_url)
 
-        # 构造 yt-dlp 命令
+        # 构造 yt-dlp 命令（绑定 venv 内 yt-dlp，见 utils.ytdlp_cmd）
         cmd = [
-            "yt-dlp",
+            *ytdlp_cmd(),
             "--flat-playlist",
             "--no-progress",
             "--no-warnings",
@@ -353,7 +354,7 @@ class BilibiliEngine(BaseEngine):
             output_template = os.path.join(save_dir, "%(upload_date)s_%(title).15s_%(id)s.%(ext)s")
 
             cmd = [
-                "yt-dlp",
+                *ytdlp_cmd(),
                 "-f", fmt,
                 "--merge-output-format", "mp4",
                 "-o", output_template,
